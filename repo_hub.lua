@@ -1,14 +1,15 @@
 --// repo hub: scans your github repo, lists every other script, click to run (client side)
 
 local CONFIG = {
-	Owner = "YOUR_GITHUB_USERNAME",
-	Repo = "YOUR_REPO_NAME",
+	Owner = "GGSOZI",
+	Repo = "Spell-by-DuaKno",
 	Branch = "main",
 	StartPath = "",            -- "" = repo root, or a folder like "scripts"
 	SelfFile = "repo_hub.lua", -- this file's name in the repo, it gets skipped
 	MaxDepth = 3,              -- how many folders deep to scan
 	Token = nil,               -- optional github token string, avoids rate limit
 	Extensions = { lua = true, luau = true, txt = true },
+	AllowNoExtension = true,   -- files with no extension, like "1 Snowgrave and Iceshock by DuaKNo"
 }
 
 local Players = cloneref(game:GetService("Players"))
@@ -45,13 +46,19 @@ end
 
 local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request
 
+local lastStatus = nil
+
 local function httpGet(url: string, withAuth: boolean?): string?
+	lastStatus = nil
 	local headers = { ["User-Agent"] = "repo-hub" }
 	if withAuth and CONFIG.Token then
 		headers["Authorization"] = "Bearer " .. CONFIG.Token
 	end
 	if httpRequest then
 		local ok, res = pcall(httpRequest, { Url = url, Method = "GET", Headers = headers })
+		if ok and res then
+			lastStatus = res.StatusCode
+		end
 		if ok and res and res.StatusCode == 200 then
 			return res.Body
 		end
@@ -72,7 +79,10 @@ end
 
 local function hasValidExt(name: string): boolean
 	local ext = string.match(name, "%.([%w_]+)$")
-	return ext ~= nil and CONFIG.Extensions[string.lower(ext)] == true
+	if ext == nil then
+		return CONFIG.AllowNoExtension
+	end
+	return CONFIG.Extensions[string.lower(ext)] == true
 end
 
 local function scan(path: string, depth: number, out: { any })
@@ -81,7 +91,7 @@ local function scan(path: string, depth: number, out: { any })
 	)
 	local body, err = httpGet(url, true)
 	if not body then
-		return err or "fetch failed"
+		return err or ("http " .. tostring(lastStatus or "no response") .. " (check Owner/Repo/Branch)")
 	end
 	local ok, data = pcall(function()
 		return HttpService:JSONDecode(body)
