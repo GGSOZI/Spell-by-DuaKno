@@ -1,5 +1,7 @@
---// spells hub: a < tab in the top right corner opens a window listing every script in your repo (client side)
---// tap a row to run it. running a new one removes the previous one's tools, guis, threads and connections
+--// SPELLS HUB // powers + weapons // by DuaKNo
+--// client side executor gui. save as "repo_hub.lua" in the repo root, the scan skips it
+--// scans your github repo, sorts every script into POWERS or WEAPONS, preview + activate/equip
+--// running a new one removes the previous one's tools, guis, threads and connections (toggle in settings)
 
 local cloneref = cloneref or function(x) return x end
 
@@ -11,931 +13,2681 @@ local TweenService = cloneref(game:GetService("TweenService"))
 local RunService = cloneref(game:GetService("RunService"))
 local UserInputService = cloneref(game:GetService("UserInputService"))
 
+--// ============================== config ==============================
+
 local CONFIG = {
 	Owner = "GGSOZI",
 	Repo = "Spell-by-DuaKno",
 	Branch = "main",
-	StartPath = "",            -- "" = repo root, or a folder like "scripts"
-	SelfFile = "repo_hub.lua", -- this file's name in the repo, it gets skipped
-	MaxDepth = 3,              -- how many folders deep to scan
-	Token = nil,               -- optional github token string, avoids rate limit
+	StartPath = "",             -- "" = repo root, or a folder like "scripts"
+	SelfFile = "repo_hub.lua",  -- this file's name in the repo, skipped in the scan
+	MaxDepth = 3,
+	Token = nil,                -- optional github token string, avoids rate limit
 	Extensions = { lua = true, luau = true, txt = true },
-	AllowNoExtension = true,   -- files with no extension, like "1 Snowgrave and Iceshock by DuaKNo"
+	AllowNoExtension = true,
+	SettleTime = 1.5,           -- seconds after a run that new tools/guis count as that script's
 
-	TabY = 12,                 -- height of the < tab from the top of the screen
-	TabHeight = 52,
-	WindowWidth = 292,
-	WindowHeight = 372,
-	SlideSpeed = 0.28,
-	SettleTime = 1.5,          -- seconds after a run that new tools/guis count as that script's
+	WindowWidth = 580,
+	WindowHeight = 364,
+	TabY = 12,                  -- height of the < tab from the top of the screen
+	SettingsFile = "SpellsHub_settings.json",
+
+	Credit = { UserName = "DuaKNo", Instagram = "me_duakno", Discord = "discord.gg/empgqd5qpq" },
+
+	-- folders decide the section first: Repo/Weapons/x.lua -> WEAPONS
+	WeaponFolders = { weapon = true, weapons = true, guns = true, arms = true, arsenal = true },
+	PowerFolders = { power = true, powers = true, moves = true, abilities = true, spells = true },
+
+	-- no folder? the file name decides
+	WeaponWords = {
+		"sword", "katana", "blade", "saber", "scythe", "axe", "knife", "dagger", "spear", "trident",
+		"gun", "rifle", "pistol", "shotgun", "sniper", "launcher", "cannon", "flamethrower",
+		"bow", "hammer", "whip", "weapon",
+	},
+
+	Categories = {
+		{ name = "Ice", color = Color3.fromRGB(120, 205, 255), words = { "snow", "ice", "frost", "freez", "glacier" } },
+		{ name = "Fire", color = Color3.fromRGB(255, 122, 66), words = { "fire", "flame", "burn", "ember", "inferno", "magma" } },
+		{ name = "Storm", color = Color3.fromRGB(255, 218, 92), words = { "thunder", "lightning", "shock", "volt", "storm" } },
+		{ name = "Movement", color = Color3.fromRGB(112, 232, 176), words = { "parkour", "dash", "fly", "speed", "wall", "teleport", "glide" } },
+		{ name = "Summon", color = Color3.fromRGB(194, 138, 255), words = { "pet", "guard", "summon", "dog", "cat", "army", "npc" } },
+		{ name = "Combat", color = Color3.fromRGB(255, 102, 124), words = { "moveset", "combo", "fight", "punch", "domain" } },
+		{ name = "Blade", color = Color3.fromRGB(206, 214, 232), words = { "sword", "katana", "blade", "saber", "scythe", "axe", "knife", "dagger", "spear" } },
+		{ name = "Ranged", color = Color3.fromRGB(255, 184, 84), words = { "gun", "rifle", "pistol", "shotgun", "sniper", "launcher", "cannon", "bow" } },
+	},
+	GeneralColor = Color3.fromRGB(150, 160, 184),
+
+	-- per file overrides, key = file name without extension. every field is optional
+	-- kind = "Powers" | "Weapons", category = any name, desc = text, color = Color3
+	Meta = {
+		["1 Snowgrave and Iceshock by DuaKNo"] = {
+			kind = "Powers",
+			category = "Ice",
+			desc = "Snowgrave and Iceshock, custom ice spells.",
+		},
+	},
 }
 
-local COLOR = {
-	window = Color3.fromRGB(12, 13, 17),
-	header = Color3.fromRGB(17, 19, 25),
-	line = Color3.fromRGB(30, 34, 44),
-	edge = Color3.fromRGB(40, 46, 60),
-	row = Color3.fromRGB(12, 13, 17),
-	rowHover = Color3.fromRGB(22, 25, 33),
-	rowActive = Color3.fromRGB(18, 30, 42),
-	accent = Color3.fromRGB(110, 200, 255),
-	text = Color3.fromRGB(214, 222, 235),
-	dim = Color3.fromRGB(122, 132, 148),
-	good = Color3.fromRGB(120, 230, 170),
-	bad = Color3.fromRGB(255, 96, 110),
-	badSoft = Color3.fromRGB(58, 24, 30),
+local MetaLower = {}
+for key, meta in pairs(CONFIG.Meta) do
+	MetaLower[string.lower(key)] = meta
+end
+
+local THEME = {
+	bg = Color3.fromRGB(8, 8, 11),
+	panel = Color3.fromRGB(13, 13, 18),
+	raised = Color3.fromRGB(21, 21, 29),
+	line = Color3.fromRGB(34, 34, 47),
+	text = Color3.fromRGB(228, 228, 238),
+	soft = Color3.fromRGB(182, 182, 198),
+	dim = Color3.fromRGB(118, 118, 140),
+	faint = Color3.fromRGB(70, 70, 90),
+	ink = Color3.fromRGB(10, 10, 14),
+	good = Color3.fromRGB(110, 232, 168),
+	bad = Color3.fromRGB(255, 92, 108),
+	accents = {
+		Powers = Color3.fromRGB(152, 120, 255),
+		Weapons = Color3.fromRGB(255, 112, 72),
+		Settings = Color3.fromRGB(198, 206, 224),
+	},
 }
 
-local alive = true
-local connections = {}
-local gui
+local HEADER, FOOTER, SIDE, ROW_H = 34, 20, 46, 50
+local TAB_ORDER = { "Powers", "Weapons", "Settings" }
+local TAB_INDEX = { Powers = 1, Weapons = 2, Settings = 3 }
+
+--// ============================== state ==============================
+
+local State = {
+	alive = true,
+	connections = {},
+	gui = nil,
+	runs = {},
+	cache = {},
+	entries = {},
+	avatar = nil,
+	spin = nil,
+	binding = false,
+	toggleKey = Enum.KeyCode.RightShift,
+	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, ToggleKey = "RightShift" },
+}
 
 local function track(conn)
-	table.insert(connections, conn)
+	table.insert(State.connections, conn)
 	return conn
 end
 
 local function cleanup()
-	alive = false
-	for _, conn in ipairs(connections) do
+	State.alive = false
+	for _, conn in ipairs(State.connections) do
 		pcall(function() conn:Disconnect() end)
 	end
-	connections = {}
-	if gui then
-		pcall(function() gui:Destroy() end)
-		gui = nil
+	State.connections = {}
+	if State.gui then
+		pcall(function() State.gui:Destroy() end)
+		State.gui = nil
 	end
 end
 
 if getgenv then
+	if getgenv().SpellsHubCleanup then
+		pcall(getgenv().SpellsHubCleanup)
+	end
 	if getgenv().RepoHubCleanup then
 		pcall(getgenv().RepoHubCleanup)
 	end
+	getgenv().SpellsHubCleanup = cleanup
 	getgenv().RepoHubCleanup = cleanup
 end
 
-local function notify(title: string, text: string)
+local function saveSettings()
+	if not writefile then return end
+	pcall(function()
+		writefile(CONFIG.SettingsFile, HttpService:JSONEncode(State.settings))
+	end)
+end
+
+local function loadSettings()
+	if not (isfile and readfile) then return end
+	pcall(function()
+		if not isfile(CONFIG.SettingsFile) then return end
+		local data = HttpService:JSONDecode(readfile(CONFIG.SettingsFile))
+		if type(data) ~= "table" then return end
+		for key, default in pairs(State.settings) do
+			if type(data[key]) == type(default) then
+				State.settings[key] = data[key]
+			end
+		end
+		State.settings.Scale = math.clamp(State.settings.Scale, 0.8, 1.3)
+		local kc = Enum.KeyCode[State.settings.ToggleKey]
+		if kc then
+			State.toggleKey = kc
+		else
+			State.settings.ToggleKey = "RightShift"
+		end
+	end)
+end
+
+local function notify(title, text)
 	pcall(function()
 		StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = 4 })
 	end)
 end
 
-local function main()
-	--// http
+local function copyText(text)
+	local fn = setclipboard or toclipboard
+	if fn then
+		return pcall(fn, text)
+	end
+	return false
+end
 
-	local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request
-	local lastStatus = nil
+local function hex(c)
+	return string.format("%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
 
-	local function httpGet(url: string, withAuth: boolean?): string?
-		lastStatus = nil
-		local headers = { ["User-Agent"] = "repo-hub" }
-		if withAuth and CONFIG.Token then
-			headers["Authorization"] = "Bearer " .. CONFIG.Token
-		end
-		if httpRequest then
-			local ok, res = pcall(httpRequest, { Url = url, Method = "GET", Headers = headers })
-			if ok and res then
-				lastStatus = res.StatusCode
-			end
-			if ok and res and res.StatusCode == 200 then
+local function hashString(s)
+	local h = 5381
+	for i = 1, #s do
+		h = (h * 33 + string.byte(s, i)) % 4294967296
+	end
+	return h
+end
+
+--// ============================== net ==============================
+
+local Net = { lastStatus = nil }
+local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request
+
+function Net.get(url, withAuth)
+	Net.lastStatus = nil
+	local headers = { ["User-Agent"] = "spells-hub" }
+	if withAuth and CONFIG.Token then
+		headers["Authorization"] = "Bearer " .. CONFIG.Token
+	end
+	if httpRequest then
+		local ok, res = pcall(httpRequest, { Url = url, Method = "GET", Headers = headers })
+		if ok and type(res) == "table" then
+			Net.lastStatus = res.StatusCode
+			if res.StatusCode == 200 and type(res.Body) == "string" then
 				return res.Body
 			end
-			if ok and res and res.StatusCode == 403 then
+			if res.StatusCode == 403 or res.StatusCode == 429 then
 				return nil, "rate limited"
 			end
 		end
-		local ok, body = pcall(function()
-			return game:HttpGet(url)
-		end)
-		if ok and type(body) == "string" and #body > 0 then
-			return body
-		end
-		return nil
 	end
-
-	--// repo scan
-
-	local function hasValidExt(name: string): boolean
-		local ext = string.match(name, "%.([%w_]+)$")
-		if ext == nil then
-			return CONFIG.AllowNoExtension
-		end
-		return CONFIG.Extensions[string.lower(ext)] == true
+	local ok, body = pcall(function()
+		return game:HttpGet(url)
+	end)
+	if ok and type(body) == "string" and #body > 0 then
+		return body
 	end
+	return nil
+end
 
-	local function scan(path: string, depth: number, out: { any })
-		local url = ("https://api.github.com/repos/%s/%s/contents/%s?ref=%s"):format(
-			CONFIG.Owner, CONFIG.Repo, path, CONFIG.Branch
-		)
-		local body, err = httpGet(url, true)
-		if not body then
-			return err or ("http " .. tostring(lastStatus or "no response") .. " (check Owner/Repo/Branch)")
+function Net.source(entry)
+	local cached = State.cache[entry.url]
+	if cached then return cached end
+	local body = Net.get(entry.url, false)
+	if body then
+		State.cache[entry.url] = body
+	end
+	return body
+end
+
+--// ============================== repo ==============================
+
+local Repo = {}
+
+function Repo.encode(path)
+	return (string.gsub(path, "[^%w%-%._~/]", function(c)
+		return string.format("%%%02X", string.byte(c))
+	end))
+end
+
+function Repo.validExt(name)
+	local ext = string.match(name, "%.([%w_]+)$")
+	if ext == nil then
+		return CONFIG.AllowNoExtension
+	end
+	return CONFIG.Extensions[string.lower(ext)] == true
+end
+
+function Repo.scan(path, depth, out)
+	local url = ("https://api.github.com/repos/%s/%s/contents/%s?ref=%s"):format(
+		CONFIG.Owner, CONFIG.Repo, Repo.encode(path), CONFIG.Branch
+	)
+	local body, err = Net.get(url, true)
+	if not body then
+		return err or ("http " .. tostring(Net.lastStatus or "no response") .. " (check Owner/Repo/Branch)")
+	end
+	local ok, data = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+	if not ok or type(data) ~= "table" then
+		return "bad response"
+	end
+	for _, item in ipairs(data) do
+		if item.type == "file" then
+			local isSelf = string.lower(item.path) == string.lower(CONFIG.SelfFile)
+				or string.lower(item.name) == string.lower(CONFIG.SelfFile)
+			if not isSelf and Repo.validExt(item.name) and item.download_url then
+				table.insert(out, { name = item.name, path = item.path, url = item.download_url })
+			end
+		elseif item.type == "dir" and depth < CONFIG.MaxDepth then
+			Repo.scan(item.path, depth + 1, out)
 		end
-		local ok, data = pcall(function()
-			return HttpService:JSONDecode(body)
-		end)
-		if not ok or type(data) ~= "table" then
-			return "bad response"
+	end
+	return nil
+end
+
+function Repo.categoryColor(name)
+	for _, cat in ipairs(CONFIG.Categories) do
+		if cat.name == name then
+			return cat.color
 		end
-		for _, item in ipairs(data) do
-			if item.type == "file" then
-				local isSelf = string.lower(item.path) == string.lower(CONFIG.SelfFile)
-					or string.lower(item.name) == string.lower(CONFIG.SelfFile)
-				if not isSelf and hasValidExt(item.name) and item.download_url then
-					table.insert(out, { name = item.name, path = item.path, url = item.download_url })
-				end
-			elseif item.type == "dir" and depth < CONFIG.MaxDepth then
-				scan(item.path, depth + 1, out)
+	end
+	return CONFIG.GeneralColor
+end
+
+function Repo.build(raw)
+	local out = {}
+	for _, item in ipairs(raw) do
+		local base = string.gsub(item.name, "%.%w+$", "")
+		local key = string.lower(base)
+		local meta = MetaLower[key] or {}
+
+		local top = string.match(item.path, "^([^/]+)/")
+		top = top and string.lower(top)
+
+		local kind = meta.kind
+		if not kind and top then
+			if CONFIG.WeaponFolders[top] then
+				kind = "Weapons"
+			elseif CONFIG.PowerFolders[top] then
+				kind = "Powers"
 			end
 		end
-		return nil
+		if not kind then
+			for _, w in ipairs(CONFIG.WeaponWords) do
+				if string.find(key, w, 1, true) then
+					kind = "Weapons"
+					break
+				end
+			end
+		end
+		kind = kind or "Powers"
+
+		local category = meta.category
+		if not category then
+			for _, cat in ipairs(CONFIG.Categories) do
+				for _, w in ipairs(cat.words) do
+					if string.find(key, w, 1, true) then
+						category = cat.name
+						break
+					end
+				end
+				if category then break end
+			end
+		end
+		category = category or "General"
+
+		local pretty = string.gsub(base, "^%d+[%s%._%-]+", "")
+		pretty = string.gsub(pretty, "_", " ")
+		if pretty == "" then pretty = base end
+
+		table.insert(out, {
+			name = pretty,
+			file = item.name,
+			path = item.path,
+			url = item.url,
+			kind = kind,
+			category = category,
+			color = meta.color or Repo.categoryColor(category),
+			desc = meta.desc,
+			seed = hashString(item.path),
+			info = nil,
+		})
+	end
+	return out
+end
+
+local function describeSource(src)
+	local parts = {}
+	for line in string.gmatch(string.sub(src, 1, 1500), "[^\r\n]+") do
+		local c = string.match(line, "^%s*%-%-+%s*/*%s*(.-)%s*$")
+		if c == nil then
+			if string.match(line, "^%s*$") then
+				continue
+			end
+			break
+		end
+		if string.sub(c, 1, 1) == "[" then
+			break
+		end
+		if c ~= "" and not string.match(c, "^[=%-_#%*]+$") then
+			table.insert(parts, c)
+		end
+		if #parts >= 2 then break end
+	end
+	local text = table.concat(parts, " ")
+	if #text > 170 then
+		text = string.sub(text, 1, 167) .. "..."
+	end
+	return text
+end
+
+--// ============================== ui helpers ==============================
+
+local function new(class, props)
+	local inst = Instance.new(class)
+	if inst:IsA("GuiObject") then
+		inst.BorderSizePixel = 0
+	end
+	if inst:IsA("GuiButton") then
+		inst.AutoButtonColor = false
+	end
+	if inst:IsA("TextLabel") or inst:IsA("TextButton") then
+		inst.Text = ""
+	end
+	local parent
+	for k, v in pairs(props or {}) do
+		if k == "Parent" then
+			parent = v
+		else
+			inst[k] = v
+		end
+	end
+	if parent then
+		inst.Parent = parent
+	end
+	return inst
+end
+
+local function tw(obj, props, t, style, dir)
+	if not State.settings.Animations then
+		t = 0
+	end
+	local tween = TweenService:Create(
+		obj,
+		TweenInfo.new(t or 0.2, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out),
+		props
+	)
+	tween:Play()
+	return tween
+end
+
+local function apply(inst, props, instant, t)
+	if instant then
+		for k, v in pairs(props) do
+			inst[k] = v
+		end
+	else
+		tw(inst, props, t or 0.16)
+	end
+end
+
+local function corner(parent, r)
+	return new("UICorner", { CornerRadius = UDim.new(0, r), Parent = parent })
+end
+
+local function stroke(parent, color, thickness, transparency)
+	return new("UIStroke", {
+		Color = color,
+		Thickness = thickness or 1,
+		Transparency = transparency or 0,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Parent = parent,
+	})
+end
+
+local function newGroup(props)
+	local ok, g = pcall(Instance.new, "CanvasGroup")
+	if not ok then
+		g = Instance.new("Frame")
+	end
+	g.BorderSizePixel = 0
+	local parent
+	for k, v in pairs(props) do
+		if k == "Parent" then parent = v else g[k] = v end
+	end
+	g.Parent = parent
+	return g
+end
+
+local function fadeGroup(g, value, t)
+	if g:IsA("CanvasGroup") then
+		tw(g, { GroupTransparency = value }, t or 0.25)
+	end
+end
+
+local function setGroup(g, value)
+	if g:IsA("CanvasGroup") then
+		g.GroupTransparency = value
+	end
+end
+
+local function bar(parent, w, h, x, y, rot, color)
+	return new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, x, 0.5, y),
+		Size = UDim2.fromOffset(w, h),
+		Rotation = rot or 0,
+		BackgroundColor3 = color,
+		Parent = parent,
+	})
+end
+
+local function viewport()
+	local cam = workspace.CurrentCamera
+	return cam and cam.ViewportSize or Vector2.new(800, 400)
+end
+
+-- squish on press, soft white flash on click
+local function pressFx(btn)
+	local sc = new("UIScale", { Parent = btn })
+	track(btn.MouseButton1Down:Connect(function()
+		tw(sc, { Scale = 0.965 }, 0.08)
+	end))
+	local function release()
+		tw(sc, { Scale = 1 }, 0.2, Enum.EasingStyle.Back)
+	end
+	track(btn.MouseButton1Up:Connect(release))
+	track(btn.MouseLeave:Connect(release))
+	return sc
+end
+
+local function pulse(btn)
+	local f = new("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BackgroundTransparency = 0.82,
+		ZIndex = btn.ZIndex + 5,
+		Parent = btn,
+	})
+	local cr = btn:FindFirstChildOfClass("UICorner")
+	if cr then
+		corner(f, cr.CornerRadius.Offset)
+	end
+	local t = tw(f, { BackgroundTransparency = 1 }, 0.4)
+	t.Completed:Connect(function()
+		f:Destroy()
+	end)
+end
+
+--// ============================== accent ==============================
+
+local Accent = { color = THEME.accents.Powers, fns = {} }
+local accentValue = Instance.new("Color3Value")
+accentValue.Value = Accent.color
+
+function Accent.bind(fn)
+	table.insert(Accent.fns, fn)
+	fn(Accent.color)
+	return fn
+end
+
+track(accentValue.Changed:Connect(function(c)
+	Accent.color = c
+	for _, fn in ipairs(Accent.fns) do
+		fn(c)
+	end
+end))
+
+function Accent.set(c, instant)
+	if instant then
+		accentValue.Value = c
+	else
+		tw(accentValue, { Value = c }, 0.45)
+	end
+end
+
+--// ============================== runner ==============================
+
+local Runner = { busy = false, busyPath = nil, listeners = {} }
+local UI = {}
+
+local function status(text, color)
+	if UI.setStatus then
+		UI.setStatus(text, color)
+	end
+end
+
+local function fire()
+	for _, fn in ipairs(Runner.listeners) do
+		pcall(fn)
+	end
+end
+
+local function snapshot()
+	local set = {}
+	local lp = Players.LocalPlayer
+	local function take(root, tools, guis)
+		if not root then return end
+		for _, c in ipairs(root:GetChildren()) do
+			if tools and (c:IsA("Tool") or c:IsA("HopperBin")) then
+				set[c] = true
+			elseif guis and c:IsA("ScreenGui") and c ~= State.gui then
+				set[c] = true
+			end
+		end
+	end
+	take(lp:FindFirstChildOfClass("Backpack"), true, false)
+	take(lp.Character, true, false)
+	take(lp:FindFirstChildOfClass("PlayerGui"), false, true)
+	take(CoreGui, false, true)
+	if gethui then
+		local ok, h = pcall(gethui)
+		if ok and h then
+			take(h, false, true)
+		end
+	end
+	return set
+end
+
+local function chunkSource(f)
+	local ok, s = pcall(function()
+		return debug.info(f, "s")
+	end)
+	if ok and type(s) == "string" then
+		return s
+	end
+	if getinfo then
+		local ok2, info = pcall(getinfo, f)
+		if ok2 and type(info) == "table" then
+			return info.source
+		end
+	end
+	return nil
+end
+
+local function signalList()
+	local sigs = {}
+	local function add(sig)
+		if sig then
+			table.insert(sigs, sig)
+		end
+	end
+	pcall(function()
+		add(RunService.Heartbeat)
+		add(RunService.RenderStepped)
+		add(RunService.Stepped)
+	end)
+	pcall(function() add(RunService.PreSimulation) end)
+	pcall(function() add(RunService.PostSimulation) end)
+	pcall(function()
+		add(UserInputService.InputBegan)
+		add(UserInputService.InputEnded)
+		add(UserInputService.InputChanged)
+		add(UserInputService.JumpRequest)
+	end)
+	pcall(function()
+		local lp = Players.LocalPlayer
+		add(lp.CharacterAdded)
+		add(lp.CharacterRemoving)
+		add(lp.Chatted)
+		local mouse = lp:GetMouse()
+		add(mouse.Button1Down)
+		add(mouse.Button1Up)
+		add(mouse.Move)
+		local ch = lp.Character
+		if ch then
+			local hum = ch:FindFirstChildOfClass("Humanoid")
+			if hum then
+				add(hum.Died)
+				add(hum.StateChanged)
+				add(hum.Running)
+				add(hum.Jumping)
+			end
+			add(ch.DescendantAdded)
+		end
+	end)
+	return sigs
+end
+
+local function killConnections(src)
+	if not src or not getconnections then return end
+	for _, sig in ipairs(signalList()) do
+		local ok, conns = pcall(getconnections, sig)
+		if ok and type(conns) == "table" then
+			for _, conn in ipairs(conns) do
+				local f = conn.Function
+				if f and chunkSource(f) == src then
+					pcall(function() conn:Disconnect() end)
+				end
+			end
+		end
+	end
+end
+
+local function killThreads(src)
+	if not src or not getgc then return end
+	local ok, objs = pcall(getgc, true)
+	if not ok or type(objs) ~= "table" then return end
+	local me = coroutine.running()
+	for _, o in ipairs(objs) do
+		if type(o) == "thread" and o ~= me then
+			for level = 0, 6 do
+				local okInfo, s = pcall(function()
+					return debug.info(o, level, "s")
+				end)
+				if not okInfo or s == nil then
+					break
+				end
+				if s == src then
+					pcall(task.cancel, o)
+					break
+				end
+			end
+		end
+	end
+end
+
+local function finalizeRun(run)
+	if run.finalized then return end
+	run.finalized = true
+	local after = snapshot()
+	for inst in pairs(after) do
+		if not run.before[inst] then
+			run.created[inst] = true
+		end
+	end
+	run.before = nil
+end
+
+local function stopRun(run)
+	State.runs[run.entry.path] = nil
+	finalizeRun(run)
+	for _, th in ipairs(run.threads) do
+		pcall(task.cancel, th)
+	end
+	killThreads(run.source)
+	killConnections(run.source)
+	for inst in pairs(run.created) do
+		pcall(function() inst:Destroy() end)
+	end
+end
+
+function Runner.isActive(entry)
+	return State.runs[entry.path] ~= nil
+end
+
+function Runner.count()
+	local n = 0
+	for _ in pairs(State.runs) do
+		n += 1
+	end
+	return n
+end
+
+function Runner.stop(entry, silent)
+	local run = State.runs[entry.path]
+	if not run then return false end
+	stopRun(run)
+	if not silent then
+		status("removed " .. entry.name)
+		fire()
+	end
+	return true
+end
+
+function Runner.stopAll(silent)
+	local list = {}
+	for _, run in pairs(State.runs) do
+		table.insert(list, run)
+	end
+	for _, run in ipairs(list) do
+		stopRun(run)
+	end
+	if not silent then
+		status(#list > 0 and "dispelled everything" or "nothing active")
+		fire()
+	end
+	return #list > 0
+end
+
+function Runner.run(entry)
+	if Runner.busy then return end
+	Runner.busy, Runner.busyPath = true, entry.path
+	fire()
+	status("fetching " .. entry.name .. "...")
+
+	local src = Net.source(entry)
+	if not src then
+		Runner.busy, Runner.busyPath = false, nil
+		status("fetch failed: " .. entry.name, THEME.bad)
+		notify("Spells", "failed to fetch " .. entry.name)
+		fire()
+		return
 	end
 
-	--// gui base
+	local fn, compileErr = loadstring(src, "=spellshub_" .. entry.file)
+	if not fn then
+		Runner.busy, Runner.busyPath = false, nil
+		status("compile error: " .. entry.name, THEME.bad)
+		notify("Spells", "compile error in " .. entry.name)
+		warn("[spells] " .. tostring(compileErr))
+		fire()
+		return
+	end
 
-	gui = Instance.new("ScreenGui")
-	gui.Name = "RepoHub"
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = 100
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	if State.settings.Stack then
+		Runner.stop(entry, true)
+	else
+		Runner.stopAll(true)
+	end
 
-	local mounted = pcall(function()
-		if gethui then
-			gui.Parent = gethui()
+	local run = {
+		entry = entry,
+		threads = {},
+		created = {},
+		before = snapshot(),
+		source = chunkSource(fn),
+		finalized = false,
+	}
+	State.runs[entry.path] = run
+
+	local th = task.spawn(function()
+		local ok, runErr = pcall(fn)
+		if ok then
+			status("running " .. entry.name, THEME.good)
 		else
-			gui.Parent = CoreGui
+			status("runtime error: " .. entry.name, THEME.bad)
+			notify("Spells", "runtime error in " .. entry.name)
+			warn("[spells] " .. tostring(runErr))
 		end
+	end)
+	table.insert(run.threads, th)
+
+	task.delay(CONFIG.SettleTime, function()
+		if State.runs[entry.path] == run then
+			finalizeRun(run)
+		end
+	end)
+
+	Runner.busy, Runner.busyPath = false, nil
+	fire()
+end
+
+--// ============================== icons ==============================
+
+local function buildSigil(parent, size, seed, color, kind)
+	local holder = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(size, size),
+		BackgroundTransparency = 1,
+		Parent = parent,
+	})
+	local parts = {}
+	local outer = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(size * 0.64, size * 0.64),
+		Rotation = 45,
+		BackgroundTransparency = 1,
+		Parent = holder,
+	})
+	stroke(outer, color, size > 40 and 1.5 or 1.25)
+	parts.outer = outer
+
+	if kind == "Weapons" then
+		bar(holder, math.max(2, size * 0.09), size * 0.58, 0, 0, 45, color)
+		bar(holder, size * 0.3, math.max(2, size * 0.07), -size * 0.1, size * 0.1, 45, color)
+		bar(holder, math.max(3, size * 0.1), math.max(3, size * 0.1), -size * 0.21, size * 0.21, 45, color)
+	else
+		local inner = new("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(size * 0.3, size * 0.3),
+			BackgroundTransparency = 1,
+			Parent = holder,
+		})
+		stroke(inner, color, 1)
+		parts.inner = inner
+		bar(holder, math.max(3, size * 0.1), math.max(3, size * 0.1), 0, 0, 45, color)
+	end
+
+	local ticks = 2 + (seed % 3)
+	for i = 1, ticks do
+		local ang = math.rad((seed * (i * 53 + 7)) % 360)
+		local r = size * 0.47
+		bar(holder, 2, 2, math.cos(ang) * r, math.sin(ang) * r, 45, color)
+	end
+	return holder, parts
+end
+
+local function makeIcon(parent, kind)
+	local holder = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, -6),
+		Size = UDim2.fromOffset(22, 22),
+		BackgroundTransparency = 1,
+		Parent = parent,
+	})
+	local icon = { strokes = {}, fills = {} }
+	if kind == "Powers" then
+		local d = new("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(13, 13),
+			Rotation = 45,
+			BackgroundTransparency = 1,
+			Parent = holder,
+		})
+		table.insert(icon.strokes, stroke(d, THEME.dim, 1.5))
+		table.insert(icon.fills, bar(holder, 4, 4, 0, 0, 45, THEME.dim))
+	elseif kind == "Weapons" then
+		table.insert(icon.fills, bar(holder, 3, 18, 0, 0, 45, THEME.dim))
+		table.insert(icon.fills, bar(holder, 10, 2, -3, 3, 45, THEME.dim))
+	else
+		for i, kx in ipairs({ -4, 3, -1 }) do
+			local y = (i - 2) * 6
+			table.insert(icon.fills, bar(holder, 18, 2, 0, y, 0, THEME.dim))
+			table.insert(icon.fills, bar(holder, 4, 6, kx, y, 0, THEME.dim))
+		end
+	end
+	function icon.paint(c)
+		for _, s in ipairs(icon.strokes) do s.Color = c end
+		for _, f in ipairs(icon.fills) do f.BackgroundColor3 = c end
+	end
+	return icon
+end
+
+local function brackets(parent, inset, len, zindex)
+	local list = {}
+	local function mark(ax, ay)
+		local px = ax == 0 and inset or -inset
+		local py = ay == 0 and inset or -inset
+		local h = new("Frame", {
+			AnchorPoint = Vector2.new(ax, ay),
+			Position = UDim2.new(ax, px, ay, py),
+			Size = UDim2.fromOffset(len, 1),
+			BackgroundColor3 = Accent.color,
+			ZIndex = zindex or 3,
+			Parent = parent,
+		})
+		local v = new("Frame", {
+			AnchorPoint = Vector2.new(ax, ay),
+			Position = UDim2.new(ax, px, ay, py),
+			Size = UDim2.fromOffset(1, len),
+			BackgroundColor3 = Accent.color,
+			ZIndex = zindex or 3,
+			Parent = parent,
+		})
+		table.insert(list, h)
+		table.insert(list, v)
+	end
+	mark(0, 0)
+	mark(1, 0)
+	mark(0, 1)
+	mark(1, 1)
+	Accent.bind(function(c)
+		for _, f in ipairs(list) do
+			f.BackgroundColor3 = c
+		end
+	end)
+end
+
+--// ============================== small controls ==============================
+
+local function ghostButton(parent, text, danger)
+	local b = new("TextButton", {
+		BackgroundColor3 = THEME.raised,
+		Font = Enum.Font.Code,
+		TextSize = 11,
+		TextColor3 = THEME.dim,
+		Text = text,
+		Parent = parent,
+	})
+	corner(b, 3)
+	local st = stroke(b, THEME.line, 1)
+	pressFx(b)
+	track(b.MouseEnter:Connect(function()
+		local c = danger and THEME.bad or Accent.color
+		tw(b, { TextColor3 = c }, 0.12)
+		tw(st, { Color = c }, 0.12)
+	end))
+	track(b.MouseLeave:Connect(function()
+		tw(b, { TextColor3 = THEME.dim }, 0.15)
+		tw(st, { Color = THEME.line }, 0.15)
+	end))
+	track(b.Activated:Connect(function()
+		pulse(b)
+	end))
+	return b
+end
+
+local function makeToggle(parent, initial, onChange)
+	local btn = new("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(36, 18),
+		BackgroundColor3 = THEME.raised,
+		Parent = parent,
+	})
+	corner(btn, 3)
+	local st = stroke(btn, THEME.line, 1)
+	local knob = new("Frame", {
+		Size = UDim2.fromOffset(12, 12),
+		Position = UDim2.new(0, 3, 0.5, -6),
+		BackgroundColor3 = THEME.dim,
+		Parent = btn,
+	})
+	corner(knob, 2)
+	local value = initial
+	local function paint(animated)
+		local pos = value and UDim2.new(1, -15, 0.5, -6) or UDim2.new(0, 3, 0.5, -6)
+		local kc = value and Accent.color or THEME.dim
+		local sc = value and Accent.color or THEME.line
+		if animated then
+			tw(knob, { Position = pos, BackgroundColor3 = kc }, 0.18)
+			tw(st, { Color = sc }, 0.18)
+		else
+			knob.Position = pos
+			knob.BackgroundColor3 = kc
+			st.Color = sc
+		end
+	end
+	paint(false)
+	Accent.bind(function()
+		paint(false)
+	end)
+	track(btn.Activated:Connect(function()
+		value = not value
+		paint(true)
+		onChange(value)
+	end))
+	return btn
+end
+
+local function makeSlider(parent, min, max, initial, step, format, onCommit)
+	local label = new("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(36, 16),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		TextSize = 11,
+		TextColor3 = THEME.soft,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = parent,
+	})
+	local trackBar = new("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -56, 0.5, 0),
+		Size = UDim2.fromOffset(96, 4),
+		BackgroundColor3 = THEME.raised,
+		Parent = parent,
+	})
+	local fill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = Accent.color, Parent = trackBar })
+	local knob = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Size = UDim2.fromOffset(8, 14),
+		BackgroundColor3 = THEME.text,
+		Parent = trackBar,
+	})
+	corner(knob, 2)
+	Accent.bind(function(c)
+		fill.BackgroundColor3 = c
+	end)
+	local hit = new("TextButton", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(1, 14, 0, 26),
+		BackgroundTransparency = 1,
+		Parent = trackBar,
+	})
+
+	local value = initial
+	local function visual(v)
+		local ratio = (v - min) / (max - min)
+		fill.Size = UDim2.fromScale(ratio, 1)
+		knob.Position = UDim2.new(ratio, 0, 0.5, 0)
+		label.Text = format(v)
+	end
+	visual(value)
+
+	local dragging = false
+	local function fromX(x)
+		local ratio = math.clamp((x - trackBar.AbsolutePosition.X) / math.max(1, trackBar.AbsoluteSize.X), 0, 1)
+		local raw = min + (max - min) * ratio
+		value = math.clamp(math.floor(raw / step + 0.5) * step, min, max)
+		visual(value)
+	end
+	track(hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			fromX(input.Position.X)
+		end
+	end))
+	track(UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			fromX(input.Position.X)
+		end
+	end))
+	track(UserInputService.InputEnded:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+			dragging = false
+			onCommit(value)
+		end
+	end))
+	return trackBar
+end
+
+--// ============================== browser (powers / weapons) ==============================
+
+local function createBrowser(kind)
+	local B = { kind = kind, rows = {}, category = "ALL", selected = nil, current = nil, chips = {}, fetchToken = 0 }
+	local singular = kind == "Weapons" and "weapon" or "power"
+	local page = newGroup({
+		Name = kind .. "Page",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Visible = false,
+		ZIndex = 2,
+		Parent = UI.content,
+	})
+	B.page = page
+
+	-- search
+	local searchWrap = new("Frame", {
+		Position = UDim2.fromOffset(10, 8),
+		Size = UDim2.new(1, -20, 0, 24),
+		BackgroundColor3 = THEME.panel,
+		Parent = page,
+	})
+	corner(searchWrap, 3)
+	local searchStroke = stroke(searchWrap, THEME.line, 1)
+	local lens = new("Frame", {
+		Position = UDim2.fromOffset(9, 6),
+		Size = UDim2.fromOffset(9, 9),
+		BackgroundTransparency = 1,
+		Parent = searchWrap,
+	})
+	corner(lens, 5)
+	stroke(lens, THEME.dim, 1.5)
+	new("Frame", {
+		Position = UDim2.fromOffset(16, 16),
+		Size = UDim2.fromOffset(5, 2),
+		Rotation = 45,
+		BackgroundColor3 = THEME.dim,
+		Parent = searchWrap,
+	})
+	local searchBox = new("TextBox", {
+		Position = UDim2.fromOffset(28, 0),
+		Size = UDim2.new(1, -90, 1, 0),
+		BackgroundTransparency = 1,
+		ClearTextOnFocus = false,
+		Font = Enum.Font.Code,
+		TextSize = 12,
+		TextColor3 = THEME.text,
+		PlaceholderColor3 = THEME.faint,
+		PlaceholderText = "search " .. singular .. "s...",
+		Text = "",
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = searchWrap,
+	})
+	local countLabel = new("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -8, 0, 0),
+		Size = UDim2.fromOffset(52, 24),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		TextSize = 10,
+		TextColor3 = THEME.faint,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = searchWrap,
+	})
+	track(searchBox.Focused:Connect(function()
+		tw(searchStroke, { Color = Accent.color }, 0.15)
+	end))
+	track(searchBox.FocusLost:Connect(function()
+		tw(searchStroke, { Color = THEME.line }, 0.2)
+	end))
+
+	-- filter chips
+	local chipBar = new("ScrollingFrame", {
+		Position = UDim2.fromOffset(0, 38),
+		Size = UDim2.new(1, 0, 0, 26),
+		BackgroundTransparency = 1,
+		ScrollBarThickness = 0,
+		ScrollingDirection = Enum.ScrollingDirection.X,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.X,
+		ElasticBehavior = Enum.ElasticBehavior.Never,
+		Parent = page,
+	})
+	new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 6),
+		Parent = chipBar,
+	})
+	new("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = chipBar })
+
+	-- list
+	local list = new("ScrollingFrame", {
+		Position = UDim2.fromOffset(0, 66),
+		Size = UDim2.new(1, -170, 1, -66),
+		BackgroundTransparency = 1,
+		ScrollBarThickness = 2,
+		ScrollBarImageColor3 = Accent.color,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		ElasticBehavior = Enum.ElasticBehavior.Never,
+		Parent = page,
+	})
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Parent = list })
+	local emptyLabel = new("TextLabel", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 90),
+		Size = UDim2.new(1, -40, 0, 30),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		TextSize = 11,
+		TextColor3 = THEME.faint,
+		Text = "nothing here",
+		Visible = false,
+		ZIndex = 3,
+		Parent = page,
+	})
+
+	-- preview
+	local pv = new("Frame", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, 66),
+		Size = UDim2.new(0, 170, 1, -66),
+		BackgroundColor3 = THEME.panel,
+		BackgroundTransparency = 0.12,
+		Parent = page,
+	})
+	new("Frame", { Size = UDim2.new(0, 1, 1, 0), BackgroundColor3 = THEME.line, Parent = pv })
+	brackets(pv, 7, 8, 4)
+
+	local sigilBox = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 12),
+		Size = UDim2.fromOffset(60, 60),
+		BackgroundTransparency = 1,
+		Parent = pv,
+	})
+	local nameLabel = new("TextLabel", {
+		Position = UDim2.fromOffset(12, 76),
+		Size = UDim2.new(1, -24, 0, 18),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextColor3 = THEME.text,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Text = "",
+		Parent = pv,
+	})
+	local tagsLabel = new("TextLabel", {
+		Position = UDim2.fromOffset(12, 95),
+		Size = UDim2.new(1, -24, 0, 12),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		TextSize = 10,
+		RichText = true,
+		TextColor3 = THEME.dim,
+		Text = "",
+		Parent = pv,
+	})
+	local infoLabel = new("TextLabel", {
+		Position = UDim2.fromOffset(12, 108),
+		Size = UDim2.new(1, -24, 0, 12),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		TextSize = 9,
+		TextColor3 = THEME.faint,
+		Text = "",
+		Parent = pv,
+	})
+	local divider = new("Frame", {
+		Position = UDim2.fromOffset(12, 126),
+		Size = UDim2.new(1, -24, 0, 1),
+		BackgroundColor3 = THEME.line,
+		Parent = pv,
+	})
+	local descLabel = new("TextLabel", {
+		Position = UDim2.fromOffset(12, 132),
+		Size = UDim2.new(1, -24, 1, -178),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		TextColor3 = THEME.dim,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Text = "",
+		Parent = pv,
+	})
+
+	local primary = new("TextButton", {
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 10, 1, -10),
+		Size = UDim2.new(1, -58, 0, 30),
+		BackgroundColor3 = Accent.color,
+		Parent = pv,
+	})
+	corner(primary, 3)
+	local primaryStroke = stroke(primary, Accent.color, 1)
+	local primaryLabel = new("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = THEME.ink,
+		Text = "SELECT",
+		Parent = primary,
+	})
+	pressFx(primary)
+
+	local copyBtn = new("TextButton", {
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -10, 1, -10),
+		Size = UDim2.fromOffset(32, 30),
+		BackgroundColor3 = THEME.raised,
+		Parent = pv,
+	})
+	corner(copyBtn, 3)
+	local copyStroke = stroke(copyBtn, THEME.line, 1)
+	local copyParts = {}
+	do
+		local back = new("Frame", {
+			Position = UDim2.fromOffset(10, 8),
+			Size = UDim2.fromOffset(9, 9),
+			BackgroundTransparency = 1,
+			Parent = copyBtn,
+		})
+		table.insert(copyParts, stroke(back, THEME.dim, 1))
+		local front = new("Frame", {
+			Position = UDim2.fromOffset(14, 12),
+			Size = UDim2.fromOffset(9, 9),
+			BackgroundColor3 = THEME.raised,
+			Parent = copyBtn,
+		})
+		table.insert(copyParts, stroke(front, THEME.dim, 1))
+	end
+	pressFx(copyBtn)
+	track(copyBtn.MouseEnter:Connect(function()
+		tw(copyStroke, { Color = Accent.color }, 0.12)
+		for _, s in ipairs(copyParts) do tw(s, { Color = Accent.color }, 0.12) end
+	end))
+	track(copyBtn.MouseLeave:Connect(function()
+		tw(copyStroke, { Color = THEME.line }, 0.15)
+		for _, s in ipairs(copyParts) do tw(s, { Color = THEME.dim }, 0.15) end
+	end))
+
+	--// painting
+
+	local function paintPrimary(instant)
+		local e = B.current
+		local bg, fg, st, label
+		if not e then
+			bg, fg, st, label = THEME.raised, THEME.faint, THEME.line, "SELECT"
+		elseif Runner.busy and Runner.busyPath == e.path then
+			bg, fg, st, label = THEME.raised, THEME.dim, THEME.line, "LOADING..."
+		elseif Runner.isActive(e) then
+			bg, fg, st = THEME.raised, Accent.color, Accent.color
+			label = kind == "Weapons" and "UNEQUIP" or "DISMISS"
+		else
+			bg, fg, st = Accent.color, THEME.ink, Accent.color
+			label = kind == "Weapons" and "EQUIP" or "ACTIVATE"
+		end
+		primaryLabel.Text = label
+		apply(primary, { BackgroundColor3 = bg }, instant)
+		apply(primaryLabel, { TextColor3 = fg }, instant)
+		apply(primaryStroke, { Color = st }, instant)
+	end
+	B.paintPrimary = paintPrimary
+
+	local function paintRow(r, instant)
+		local selected = B.selected == r
+		local active = Runner.isActive(r.entry)
+		apply(r.body, {
+			BackgroundColor3 = selected and Accent.color or Color3.new(1, 1, 1),
+			BackgroundTransparency = selected and 0.9 or (r.hover and 0.95 or 1),
+		}, instant)
+		apply(r.bar, {
+			Size = selected and UDim2.fromOffset(3, 30) or UDim2.fromOffset(2, 16),
+			BackgroundColor3 = selected and Accent.color or r.entry.color,
+		}, instant)
+		apply(r.name, { TextColor3 = (selected or r.hover) and THEME.text or THEME.soft }, instant)
+		r.tag.Visible = active
+		r.dot.Visible = active
+		if active and not r.pulse then
+			r.pulse = TweenService:Create(
+				r.dot,
+				TweenInfo.new(0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+				{ BackgroundTransparency = 0.75 }
+			)
+			r.pulse:Play()
+		elseif not active and r.pulse then
+			r.pulse:Cancel()
+			r.pulse = nil
+			r.dot.BackgroundTransparency = 0
+		end
+	end
+
+	function B.repaint()
+		for _, r in ipairs(B.rows) do
+			paintRow(r, false)
+		end
+		paintPrimary(false)
+	end
+
+	function B.onAccent(c)
+		list.ScrollBarImageColor3 = c
+		if B.selected and B.selected.body.Parent then
+			paintRow(B.selected, true)
+		end
+		local all = B.chips["ALL"]
+		if all and B.category == "ALL" then
+			all.btn.BackgroundColor3 = c
+		end
+		paintPrimary(true)
+	end
+	Accent.bind(B.onAccent)
+
+	--// preview content
+
+	local function showInfo(entry)
+		local info = entry.info
+		if not info then return end
+		descLabel.Text = entry.desc or info.desc
+		infoLabel.Text = string.format("%d LINES  %.1f KB", info.lines, info.kb)
+	end
+
+	function B.showEntry(entry)
+		B.current = entry
+		B.fetchToken += 1
+		local token = B.fetchToken
+		for _, c in ipairs(sigilBox:GetChildren()) do
+			c:Destroy()
+		end
+		local _, parts = buildSigil(sigilBox, 56, entry.seed, entry.color, kind)
+		B.spin = parts
+		if UI.current == kind then
+			State.spin = parts
+		end
+		nameLabel.Text = entry.name
+		nameLabel.TextTransparency = 1
+		tw(nameLabel, { TextTransparency = 0 }, 0.3)
+		tagsLabel.Text = string.format(
+			'<font color="#%s">%s</font>  <font color="#%s">%s</font>',
+			hex(entry.color), string.upper(entry.category), hex(THEME.dim), string.upper(singular)
+		)
+		descLabel.Text = entry.desc or "reading source..."
+		infoLabel.Text = ""
+		showInfo(entry)
+		paintPrimary(false)
+
+		if not entry.info then
+			task.spawn(function()
+				local src = Net.source(entry)
+				if not src then
+					if B.fetchToken == token then
+						descLabel.Text = entry.desc or "could not read the source"
+					end
+					return
+				end
+				local _, n = string.gsub(src, "\n", "\n")
+				entry.info = {
+					desc = describeSource(src) ~= "" and describeSource(src) or ("custom " .. singular .. " by DuaKNo."),
+					lines = n + 1,
+					kb = #src / 1024,
+				}
+				if B.fetchToken == token then
+					showInfo(entry)
+				end
+			end)
+		end
+	end
+
+	function B.select(r)
+		local old = B.selected
+		B.selected = r
+		if old and old.body.Parent then
+			paintRow(old, false)
+		end
+		if r then
+			paintRow(r, false)
+			B.showEntry(r.entry)
+		end
+	end
+
+	--// filtering
+
+	function B.applyFilter()
+		local q = string.lower(searchBox.Text)
+		local shown = 0
+		for _, r in ipairs(B.rows) do
+			local e = r.entry
+			local okCat = B.category == "ALL" or e.category == B.category
+			local okQ = q == ""
+				or string.find(string.lower(e.name), q, 1, true) ~= nil
+				or string.find(string.lower(e.category), q, 1, true) ~= nil
+				or string.find(string.lower(e.desc or ""), q, 1, true) ~= nil
+			local visible = okCat and okQ
+			r.container.Visible = visible
+			if visible then
+				shown += 1
+				r.container.LayoutOrder = shown
+			end
+		end
+		countLabel.Text = shown .. "/" .. #B.rows
+		emptyLabel.Visible = shown == 0 and #B.rows > 0
+		list.CanvasPosition = Vector2.new(0, 0)
+	end
+	track(searchBox:GetPropertyChangedSignal("Text"):Connect(B.applyFilter))
+
+	function B.animateIn()
+		local n = 0
+		for _, r in ipairs(B.rows) do
+			if r.container.Visible then
+				n += 1
+				if n <= 12 then
+					r.body.Position = UDim2.fromOffset(-40, 0)
+					task.delay((n - 1) * 0.03, function()
+						if r.body.Parent then
+							tw(r.body, { Position = UDim2.new() }, 0.3)
+						end
+					end)
+				else
+					r.body.Position = UDim2.new()
+				end
+			end
+		end
+	end
+
+	function B.paintChips(instant)
+		for name, chip in pairs(B.chips) do
+			local active = B.category == name
+			local color = chip.color or Accent.color
+			apply(chip.btn, {
+				BackgroundColor3 = active and color or THEME.raised,
+				TextColor3 = active and THEME.ink or THEME.dim,
+			}, instant)
+		end
+	end
+
+	function B.setCategory(name)
+		B.category = name
+		B.paintChips(false)
+		B.applyFilter()
+		B.animateIn()
+	end
+
+	function B.buildChips()
+		for _, c in ipairs(chipBar:GetChildren()) do
+			if c:IsA("TextButton") then
+				c:Destroy()
+			end
+		end
+		B.chips = {}
+		local seen, names = {}, {}
+		for _, r in ipairs(B.rows) do
+			if not seen[r.entry.category] then
+				seen[r.entry.category] = r.entry.color
+				table.insert(names, r.entry.category)
+			end
+		end
+		table.sort(names)
+		table.insert(names, 1, "ALL")
+		if not (B.category == "ALL" or seen[B.category]) then
+			B.category = "ALL"
+		end
+		for i, name in ipairs(names) do
+			local color = seen[name]
+			local btn = new("TextButton", {
+				LayoutOrder = i,
+				AutomaticSize = Enum.AutomaticSize.X,
+				Size = UDim2.fromOffset(0, 20),
+				BackgroundColor3 = THEME.raised,
+				Font = Enum.Font.Code,
+				TextSize = 10,
+				TextColor3 = THEME.dim,
+				Text = string.upper(name),
+				Parent = chipBar,
+			})
+			new("UIPadding", { PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9), Parent = btn })
+			corner(btn, 3)
+			pressFx(btn)
+			B.chips[name] = { btn = btn, color = color }
+			track(btn.MouseEnter:Connect(function()
+				if B.category ~= name then
+					tw(btn, { TextColor3 = color or Accent.color }, 0.12)
+				end
+			end))
+			track(btn.MouseLeave:Connect(function()
+				if B.category ~= name then
+					tw(btn, { TextColor3 = THEME.dim }, 0.15)
+				end
+			end))
+			track(btn.Activated:Connect(function()
+				if B.category ~= name then
+					B.setCategory(name)
+				end
+			end))
+		end
+		B.paintChips(true)
+	end
+
+	--// rows
+
+	function B.makeRow(entry, index)
+		local container = new("Frame", {
+			Name = "Row",
+			LayoutOrder = index,
+			Size = UDim2.new(1, 0, 0, ROW_H),
+			BackgroundTransparency = 1,
+			ClipsDescendants = true,
+			Parent = list,
+		})
+		local body = new("TextButton", {
+			Name = "Body",
+			Size = UDim2.fromScale(1, 1),
+			BackgroundColor3 = Color3.new(1, 1, 1),
+			BackgroundTransparency = 1,
+			Parent = container,
+		})
+		local barF = new("Frame", {
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 0, 0.5, 0),
+			Size = UDim2.fromOffset(2, 16),
+			BackgroundColor3 = entry.color,
+			Parent = body,
+		})
+		local sigilHold = new("Frame", {
+			Position = UDim2.fromOffset(12, 8),
+			Size = UDim2.fromOffset(34, 34),
+			BackgroundTransparency = 1,
+			Parent = body,
+		})
+		buildSigil(sigilHold, 34, entry.seed, entry.color, kind)
+		local nameL = new("TextLabel", {
+			Position = UDim2.fromOffset(56, 6),
+			Size = UDim2.new(1, -56 - 76, 0, 16),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextColor3 = THEME.soft,
+			Text = entry.name,
+			Parent = body,
+		})
+		new("TextLabel", {
+			Position = UDim2.fromOffset(56, 22),
+			Size = UDim2.new(1, -66, 0, 12),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextColor3 = entry.color,
+			Text = string.upper(entry.category),
+			Parent = body,
+		})
+		new("TextLabel", {
+			Position = UDim2.fromOffset(56, 34),
+			Size = UDim2.new(1, -66, 0, 12),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Gotham,
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextColor3 = THEME.faint,
+			Text = entry.desc or ("custom " .. singular .. " by DuaKNo"),
+			Parent = body,
+		})
+		local tag = new("TextLabel", {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -22, 0, 8),
+			Size = UDim2.fromOffset(50, 12),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			TextSize = 9,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			TextColor3 = THEME.good,
+			Text = "ACTIVE",
+			Visible = false,
+			Parent = body,
+		})
+		local dot = new("Frame", {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -12, 0, 11),
+			Size = UDim2.fromOffset(5, 5),
+			Rotation = 45,
+			BackgroundColor3 = THEME.good,
+			Visible = false,
+			Parent = body,
+		})
+		new("Frame", {
+			Position = UDim2.new(0, 12, 1, -1),
+			Size = UDim2.new(1, -24, 0, 1),
+			BackgroundColor3 = THEME.line,
+			Parent = container,
+		})
+
+		local r = { entry = entry, container = container, body = body, bar = barF, name = nameL, tag = tag, dot = dot, hover = false }
+		pressFx(body)
+		track(body.MouseEnter:Connect(function()
+			r.hover = true
+			paintRow(r, false)
+		end))
+		track(body.MouseLeave:Connect(function()
+			r.hover = false
+			paintRow(r, false)
+		end))
+		track(body.Activated:Connect(function()
+			B.select(r)
+		end))
+		return r
+	end
+
+	function B.load(entries)
+		local keepPath = B.current and B.current.path
+		for _, r in ipairs(B.rows) do
+			if r.pulse then r.pulse:Cancel() end
+			r.container:Destroy()
+		end
+		B.rows, B.selected, B.current = {}, nil, nil
+		for i, entry in ipairs(entries) do
+			table.insert(B.rows, B.makeRow(entry, i))
+		end
+		B.buildChips()
+		B.applyFilter()
+		local pick = B.rows[1]
+		for _, r in ipairs(B.rows) do
+			if r.entry.path == keepPath then
+				pick = r
+			end
+		end
+		if pick then
+			B.select(pick)
+		else
+			for _, c in ipairs(sigilBox:GetChildren()) do c:Destroy() end
+			nameLabel.Text = "no " .. singular .. "s yet"
+			tagsLabel.Text = ""
+			infoLabel.Text = ""
+			descLabel.Text = "nothing in the repo matched this section"
+			B.spin = nil
+			paintPrimary(true)
+		end
+		B.repaint()
+		B.animateIn()
+	end
+
+	function B.onShow()
+		State.spin = B.spin
+		B.animateIn()
+	end
+
+	function B.layout(contentW, contentH)
+		local pw = math.clamp(math.floor(contentW * 0.38), 150, 210)
+		list.Size = UDim2.new(1, -pw, 1, -66)
+		pv.Size = UDim2.new(0, pw, 1, -66)
+		local panelH = contentH - 66
+		descLabel.Visible = panelH >= 190
+		divider.Visible = panelH >= 190
+		infoLabel.Visible = panelH >= 170
+	end
+
+	track(primary.Activated:Connect(function()
+		local e = B.current
+		if not e or Runner.busy then return end
+		pulse(primary)
+		if Runner.isActive(e) then
+			Runner.stop(e)
+		else
+			task.spawn(Runner.run, e)
+		end
+	end))
+	track(copyBtn.Activated:Connect(function()
+		local e = B.current
+		if not e then return end
+		pulse(copyBtn)
+		local ok = copyText(string.format('loadstring(game:HttpGet("%s"))()', e.url))
+		status(ok and ("copied loadstring: " .. e.name) or "clipboard not supported here", ok and THEME.good or THEME.bad)
+	end))
+
+	return B
+end
+
+--// ============================== settings page ==============================
+
+local function createSettings()
+	local page = newGroup({
+		Name = "SettingsPage",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Visible = false,
+		ZIndex = 2,
+		Parent = UI.content,
+	})
+	local scroll = new("ScrollingFrame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		ScrollBarThickness = 2,
+		ScrollBarImageColor3 = Accent.color,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ElasticBehavior = Enum.ElasticBehavior.Never,
+		Parent = page,
+	})
+	Accent.bind(function(c)
+		scroll.ScrollBarImageColor3 = c
+	end)
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Parent = scroll })
+	new("UIPadding", { PaddingBottom = UDim.new(0, 12), Parent = scroll })
+
+	local order = 0
+	local function nextOrder()
+		order += 1
+		return order
+	end
+
+	local function heading(text)
+		local f = new("Frame", { LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = scroll })
+		local mark = new("Frame", {
+			Position = UDim2.fromOffset(14, 13),
+			Size = UDim2.fromOffset(6, 6),
+			Rotation = 45,
+			BackgroundColor3 = Accent.color,
+			Parent = f,
+		})
+		Accent.bind(function(c)
+			mark.BackgroundColor3 = c
+		end)
+		new("TextLabel", {
+			Position = UDim2.fromOffset(28, 8),
+			Size = UDim2.new(1, -40, 0, 16),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextColor3 = THEME.dim,
+			Text = text,
+			Parent = f,
+		})
+	end
+
+	local function row(title, sub, height)
+		local f = new("Frame", { LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, height or 44), BackgroundTransparency = 1, Parent = scroll })
+		new("TextLabel", {
+			Position = UDim2.fromOffset(14, 7),
+			Size = UDim2.new(1, -170, 0, 16),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextColor3 = THEME.text,
+			Text = title,
+			Parent = f,
+		})
+		new("TextLabel", {
+			Position = UDim2.fromOffset(14, 24),
+			Size = UDim2.new(1, -170, 0, 13),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Gotham,
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextColor3 = THEME.faint,
+			Text = sub,
+			Parent = f,
+		})
+		new("Frame", {
+			Position = UDim2.new(0, 14, 1, -1),
+			Size = UDim2.new(1, -28, 0, 1),
+			BackgroundColor3 = THEME.line,
+			Parent = f,
+		})
+		return f
+	end
+
+	heading("INTERFACE")
+	makeSlider(row("UI scale", "size of the whole window"), 0.8, 1.3, State.settings.Scale, 0.05, function(v)
+		return string.format("%d%%", math.floor(v * 100 + 0.5))
+	end, function(v)
+		State.settings.Scale = v
+		saveSettings()
+		UI.relayout()
+	end)
+	makeToggle(row("Particles", "drifting embers in the background"), State.settings.Particles, function(v)
+		State.settings.Particles = v
+		UI.particleLayer.Visible = v
+		saveSettings()
+	end)
+	makeToggle(row("Animations", "turn off for a flat, instant interface"), State.settings.Animations, function(v)
+		State.settings.Animations = v
+		saveSettings()
+	end)
+
+	heading("BEHAVIOUR")
+	makeToggle(row("Stack scripts", "off = running a new one removes the old one"), State.settings.Stack, function(v)
+		State.settings.Stack = v
+		saveSettings()
+	end)
+	do
+		local r = row("Toggle key", "show or hide the hub")
+		local keyBtn = ghostButton(r, string.upper(State.toggleKey.Name), false)
+		keyBtn.AnchorPoint = Vector2.new(1, 0.5)
+		keyBtn.Position = UDim2.new(1, -14, 0.5, 0)
+		keyBtn.Size = UDim2.fromOffset(96, 22)
+		UI.keyBtn = keyBtn
+		track(keyBtn.Activated:Connect(function()
+			State.binding = true
+			keyBtn.Text = "PRESS A KEY"
+		end))
+	end
+
+	heading("ACTIONS")
+	do
+		local f = new("Frame", { LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, Parent = scroll })
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			Padding = UDim.new(0, 6),
+			Parent = f,
+		})
+		new("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14), Parent = f })
+		local function actionButton(text, idx, danger, fn)
+			local b = ghostButton(f, text, danger)
+			b.LayoutOrder = idx
+			b.Size = UDim2.new(1 / 3, -4, 0, 26)
+			track(b.Activated:Connect(fn))
+		end
+		actionButton("RELOAD REPO", 1, false, function()
+			task.spawn(UI.populate)
+		end)
+		actionButton("DISPEL ALL", 2, false, function()
+			Runner.stopAll(false)
+		end)
+		actionButton("UNLOAD HUB", 3, true, function()
+			cleanup()
+		end)
+	end
+
+	heading("CREDITS")
+	do
+		local f = new("Frame", { LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 96), BackgroundTransparency = 1, Parent = scroll })
+		local av = new("ImageLabel", {
+			Position = UDim2.fromOffset(14, 6),
+			Size = UDim2.fromOffset(44, 44),
+			BackgroundColor3 = THEME.raised,
+			Image = State.avatar or "",
+			Parent = f,
+		})
+		corner(av, 3)
+		stroke(av, THEME.line, 1)
+		UI.avatarImage = av
+		new("TextLabel", {
+			Position = UDim2.fromOffset(68, 8),
+			Size = UDim2.new(1, -80, 0, 18),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			TextSize = 14,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextColor3 = THEME.text,
+			Text = CONFIG.Credit.UserName,
+			Parent = f,
+		})
+		new("TextLabel", {
+			Position = UDim2.fromOffset(68, 28),
+			Size = UDim2.new(1, -80, 0, 14),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Gotham,
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextColor3 = THEME.dim,
+			Text = "made every power and weapon in here",
+			Parent = f,
+		})
+		local links = new("Frame", { Position = UDim2.fromOffset(14, 60), Size = UDim2.new(1, -28, 0, 26), BackgroundTransparency = 1, Parent = f })
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Padding = UDim.new(0, 6),
+			Parent = links,
+		})
+		local function linkButton(text, idx, value)
+			local b = ghostButton(links, text, false)
+			b.LayoutOrder = idx
+			b.Size = UDim2.new(0.5, -3, 1, 0)
+			track(b.Activated:Connect(function()
+				local ok = copyText(value)
+				status(ok and ("copied " .. value) or value, ok and THEME.good or THEME.dim)
+			end))
+		end
+		linkButton("INSTAGRAM  " .. CONFIG.Credit.Instagram, 1, CONFIG.Credit.Instagram)
+		linkButton("DISCORD  COPY LINK", 2, CONFIG.Credit.Discord)
+	end
+
+	return { page = page }
+end
+
+--// ============================== build the window ==============================
+
+local function buildUI()
+	local gui = new("ScreenGui", {
+		Name = "SpellsHub",
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = 100,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	})
+	State.gui = gui
+	local mounted = pcall(function()
+		gui.Parent = gethui and gethui() or CoreGui
 	end)
 	if not mounted or not gui.Parent then
 		gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
 	end
 
-	local HEADER = 36
-	local TOOLBAR = 28
-	local FOOTER = 24
+	-- shell holds position/size and the open animation scale
+	local shell = new("Frame", {
+		Name = "Shell",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(CONFIG.WindowWidth, CONFIG.WindowHeight),
+		BackgroundTransparency = 1,
+		Visible = false,
+		Parent = gui,
+	})
+	UI.shell = shell
+	UI.scaler = new("UIScale", { Parent = shell })
 
-	local function viewport(): Vector2
-		local cam = workspace.CurrentCamera
-		return cam and cam.ViewportSize or Vector2.new(800, 400)
+	local halo = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(1, 14, 1, 14),
+		BackgroundColor3 = Accent.color,
+		BackgroundTransparency = 0.95,
+		Parent = shell,
+	})
+	corner(halo, 8)
+	local haloStroke = stroke(halo, Accent.color, 1, 0.85)
+	Accent.bind(function(c)
+		halo.BackgroundColor3 = c
+		haloStroke.Color = c
+	end)
+	UI.halo, UI.haloStroke = halo, haloStroke
+
+	local window = newGroup({
+		Name = "Window",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.bg,
+		Parent = shell,
+	})
+	UI.window = window
+	corner(window, 4)
+	local wStroke = new("UIStroke", {
+		Color = Color3.new(1, 1, 1),
+		Thickness = 1.5,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Parent = window,
+	})
+	local wGrad = new("UIGradient", { Parent = wStroke })
+	UI.strokeGrad = wGrad
+	Accent.bind(function(c)
+		wGrad.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, c),
+			ColorSequenceKeypoint.new(0.5, THEME.line),
+			ColorSequenceKeypoint.new(1, c),
+		})
+	end)
+
+	-- content area (particles behind pages)
+	local content = new("Frame", {
+		Name = "Content",
+		Position = UDim2.fromOffset(SIDE, HEADER),
+		Size = UDim2.new(1, -SIDE, 1, -HEADER - FOOTER),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		Parent = window,
+	})
+	UI.content = content
+
+	local pLayer = new("Frame", {
+		Name = "Particles",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		ZIndex = 1,
+		Visible = State.settings.Particles,
+		Parent = content,
+	})
+	UI.particleLayer = pLayer
+	UI.particles = {}
+	for i = 1, 16 do
+		local s = ({ 2, 2, 3 })[i % 3 + 1]
+		local f = new("Frame", {
+			Size = UDim2.fromOffset(s, s),
+			Rotation = 45,
+			BackgroundColor3 = Accent.color,
+			BackgroundTransparency = 0.85,
+			Parent = pLayer,
+		})
+		UI.particles[i] = {
+			f = f,
+			x = math.random(),
+			y = math.random(),
+			speed = 0.018 + math.random() * 0.04,
+			phase = math.random() * 6.28,
+			sway = 0.006 + math.random() * 0.014,
+		}
 	end
+	Accent.bind(function(c)
+		for _, p in ipairs(UI.particles) do
+			p.f.BackgroundColor3 = c
+		end
+	end)
 
-	local function tweenTo(obj: Instance, props, t: number?, style: Enum.EasingStyle?)
-		local tw = TweenService:Create(
-			obj,
-			TweenInfo.new(t or CONFIG.SlideSpeed, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-			props
+	-- header
+	local header = new("Frame", { Name = "Header", Size = UDim2.new(1, 0, 0, HEADER), BackgroundColor3 = THEME.panel, ZIndex = 5, Parent = window })
+	local mark = new("Frame", {
+		Position = UDim2.fromOffset(14, 11),
+		Size = UDim2.fromOffset(12, 12),
+		Rotation = 45,
+		BackgroundTransparency = 1,
+		ZIndex = 6,
+		Parent = header,
+	})
+	local markStroke = stroke(mark, Accent.color, 1.5)
+	local markDot = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(4, 4),
+		BackgroundColor3 = Accent.color,
+		ZIndex = 6,
+		Parent = mark,
+	})
+	local title = new("TextLabel", {
+		Position = UDim2.fromOffset(38, 0),
+		Size = UDim2.new(1, -120, 1, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Michroma,
+		TextSize = 12,
+		RichText = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextColor3 = THEME.text,
+		ZIndex = 6,
+		Parent = header,
+	})
+	Accent.bind(function(c)
+		markStroke.Color = c
+		markDot.BackgroundColor3 = c
+		title.Text = string.format(
+			'SPELLS <font color="#%s">//</font> <font size="9" color="#%s">DUAKNO</font>',
+			hex(c), hex(THEME.dim)
 		)
-		tw:Play()
-		return tw
-	end
+	end)
 
-	local function round(parent: Instance, r: number)
-		local c = Instance.new("UICorner")
-		c.CornerRadius = UDim.new(0, r)
-		c.Parent = parent
-	end
+	new("Frame", { Position = UDim2.new(0, 0, 1, -1), Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = THEME.line, ZIndex = 6, Parent = header })
+	local sweep = new("Frame", {
+		Position = UDim2.new(0, 0, 1, -2),
+		Size = UDim2.new(1, 0, 0, 2),
+		BackgroundColor3 = Accent.color,
+		ZIndex = 7,
+		Parent = header,
+	})
+	local sweepGrad = new("UIGradient", {
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(0.5, 0),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+		Parent = sweep,
+	})
+	UI.sweepGrad = sweepGrad
+	Accent.bind(function(c)
+		sweep.BackgroundColor3 = c
+	end)
 
-	local function edge(parent: Instance)
-		local s = Instance.new("UIStroke")
-		s.Color = COLOR.edge
-		s.Thickness = 1
-		s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-		s.Parent = parent
-		return s
-	end
-
-	local function solid(parent: Instance, color: Color3, size: UDim2, pos: UDim2)
-		local f = Instance.new("Frame")
-		f.BackgroundColor3 = color
-		f.BorderSizePixel = 0
-		f.Size = size
-		f.Position = pos
-		f.Parent = parent
-		return f
-	end
-
-	-- the < tab in the top right corner
-	local tab = Instance.new("TextButton")
-	tab.Name = "Tab"
-	tab.AutoButtonColor = false
-	tab.AnchorPoint = Vector2.new(1, 0)
-	tab.Position = UDim2.new(1, 0, 0, CONFIG.TabY)
-	tab.Size = UDim2.fromOffset(24, CONFIG.TabHeight)
-	tab.BackgroundColor3 = COLOR.header
-	tab.BorderSizePixel = 0
-	tab.Font = Enum.Font.Code
-	tab.TextSize = 18
-	tab.TextColor3 = COLOR.dim
-	tab.Text = "<"
-	tab.ZIndex = 30
-	tab.Parent = gui
-	round(tab, 6)
-	edge(tab)
-
-	local tabMark = solid(tab, COLOR.accent, UDim2.fromOffset(2, 22), UDim2.new(0, 0, 0.5, -11))
-	tabMark.ZIndex = 31
-
-	track(tab.MouseEnter:Connect(function()
-		tab.TextColor3 = COLOR.accent
-		tab.BackgroundColor3 = COLOR.rowHover
-	end))
-	track(tab.MouseLeave:Connect(function()
-		tab.TextColor3 = COLOR.dim
-		tab.BackgroundColor3 = COLOR.header
-	end))
-
-	-- window
-	local window = Instance.new("Frame")
-	window.Name = "Window"
-	window.AnchorPoint = Vector2.new(1, 0)
-	window.BackgroundColor3 = COLOR.window
-	window.BorderSizePixel = 0
-	window.ClipsDescendants = true
-	window.Size = UDim2.fromOffset(CONFIG.WindowWidth, CONFIG.WindowHeight)
-	window.Position = UDim2.new(1, CONFIG.WindowWidth + 16, 0, CONFIG.TabY + CONFIG.TabHeight + 8)
-	window.Visible = false
-	window.ZIndex = 10
-	window.Parent = gui
-	round(window, 6)
-	edge(window)
-
-	local header = solid(window, COLOR.header, UDim2.new(1, 0, 0, HEADER), UDim2.new())
-	header.Name = "Header"
-	header.ZIndex = 11
-
-	local accentLine = solid(header, COLOR.accent, UDim2.new(1, 0, 0, 2), UDim2.new())
-	accentLine.ZIndex = 12
-
-	local title = Instance.new("TextLabel")
-	title.Name = "Title"
-	title.BackgroundTransparency = 1
-	title.Position = UDim2.fromOffset(14, 2)
-	title.Size = UDim2.new(1, -90, 1, -2)
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 14
-	title.RichText = true
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextColor3 = COLOR.text
-	title.Text = 'SPELLS <font color="#6EC8FF">/</font> <font size="11" color="#7A8494">DUAKNO</font>'
-	title.ZIndex = 12
-	title.Parent = header
-
-	-- header buttons with drawn icons, no glyphs
-	local function headerButton(kind: string, indexFromRight: number)
-		local b = Instance.new("TextButton")
-		b.AutoButtonColor = false
-		b.BackgroundColor3 = COLOR.rowHover
-		b.BackgroundTransparency = 1
-		b.BorderSizePixel = 0
-		b.Text = ""
-		b.Size = UDim2.new(0, 32, 1, -2)
-		b.Position = UDim2.new(1, -32 * indexFromRight, 0, 2)
-		b.ZIndex = 12
-		b.Parent = header
-
+	local function headerButton(kind, idx)
+		local b = new("TextButton", {
+			Position = UDim2.new(1, -32 * idx, 0, 0),
+			Size = UDim2.fromOffset(32, HEADER - 2),
+			BackgroundColor3 = THEME.raised,
+			BackgroundTransparency = 1,
+			ZIndex = 6,
+			Parent = header,
+		})
 		local marks = {}
 		if kind == "min" then
-			local m = solid(b, COLOR.dim, UDim2.fromOffset(10, 2), UDim2.new(0.5, -5, 0.5, -1))
-			m.ZIndex = 13
-			table.insert(marks, m)
+			table.insert(marks, bar(b, 10, 2, 0, 0, 0, THEME.dim))
 		else
-			for _, rot in ipairs({ 45, -45 }) do
-				local m = solid(b, COLOR.dim, UDim2.fromOffset(14, 2), UDim2.new(0.5, -7, 0.5, -1))
-				m.Rotation = rot
-				m.ZIndex = 13
-				table.insert(marks, m)
-			end
+			table.insert(marks, bar(b, 13, 2, 0, 0, 45, THEME.dim))
+			table.insert(marks, bar(b, 13, 2, 0, 0, -45, THEME.dim))
 		end
-
-		local hoverBg = (kind == "close") and COLOR.badSoft or COLOR.rowHover
-		local hoverFg = (kind == "close") and COLOR.bad or COLOR.accent
-
+		for _, m in ipairs(marks) do m.ZIndex = 7 end
 		track(b.MouseEnter:Connect(function()
-			b.BackgroundColor3 = hoverBg
-			b.BackgroundTransparency = 0
-			for _, m in ipairs(marks) do
-				m.BackgroundColor3 = hoverFg
-			end
+			local c = kind == "close" and THEME.bad or Accent.color
+			tw(b, { BackgroundTransparency = 0.5 }, 0.12)
+			for _, m in ipairs(marks) do tw(m, { BackgroundColor3 = c }, 0.12) end
 		end))
 		track(b.MouseLeave:Connect(function()
-			b.BackgroundTransparency = 1
-			for _, m in ipairs(marks) do
-				m.BackgroundColor3 = COLOR.dim
-			end
+			tw(b, { BackgroundTransparency = 1 }, 0.15)
+			for _, m in ipairs(marks) do tw(m, { BackgroundColor3 = THEME.dim }, 0.15) end
 		end))
 		return b, marks
 	end
-
 	local closeBtn = headerButton("close", 1)
 	local minBtn, minMarks = headerButton("min", 2)
+	UI.minMarks = minMarks
 
-	-- toolbar: plain text actions split by thin dividers
-	local toolbar = solid(window, COLOR.window, UDim2.new(1, 0, 0, TOOLBAR), UDim2.fromOffset(0, HEADER))
-	toolbar.Name = "Toolbar"
-	toolbar.ZIndex = 9
-	solid(toolbar, COLOR.line, UDim2.new(1, 0, 0, 1), UDim2.new(0, 0, 1, -1)).ZIndex = 12
+	-- drag
+	local dragging, dragStart, startPos = false, nil, nil
+	track(header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = shell.Position
+			local c
+			c = input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+					c:Disconnect()
+				end
+			end)
+		end
+	end))
+	track(UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local d = input.Position - dragStart
+			shell.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		end
+	end))
 
-	local function toolButton(text: string, index: number, danger: boolean?)
-		local b = Instance.new("TextButton")
-		b.AutoButtonColor = false
-		b.BackgroundTransparency = 1
-		b.BorderSizePixel = 0
-		b.Size = UDim2.new(1 / 3, 0, 1, -1)
-		b.Position = UDim2.new((index - 1) / 3, 0, 0, 0)
-		b.Font = Enum.Font.Code
-		b.TextSize = 12
-		b.TextColor3 = COLOR.dim
-		b.Text = text
-		b.ZIndex = 12
-		b.Parent = toolbar
+	-- sidebar
+	local sidebar = new("Frame", {
+		Name = "Sidebar",
+		Position = UDim2.fromOffset(0, HEADER),
+		Size = UDim2.new(0, SIDE, 1, -HEADER - FOOTER),
+		BackgroundColor3 = THEME.panel,
+		ZIndex = 4,
+		Parent = window,
+	})
+	new("Frame", { Position = UDim2.new(1, -1, 0, 0), Size = UDim2.new(0, 1, 1, 0), BackgroundColor3 = THEME.line, ZIndex = 5, Parent = sidebar })
 
-		local hot = danger and COLOR.bad or COLOR.accent
+	local glow = new("Frame", {
+		Position = UDim2.fromOffset(0, 18),
+		Size = UDim2.fromOffset(30, 30),
+		BackgroundColor3 = Accent.color,
+		ZIndex = 5,
+		Parent = sidebar,
+	})
+	new("UIGradient", {
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.78), NumberSequenceKeypoint.new(1, 1) }),
+		Parent = glow,
+	})
+	local indicator = new("Frame", {
+		Position = UDim2.fromOffset(0, 18),
+		Size = UDim2.fromOffset(3, 30),
+		BackgroundColor3 = Accent.color,
+		ZIndex = 6,
+		Parent = sidebar,
+	})
+	Accent.bind(function(c)
+		glow.BackgroundColor3 = c
+		indicator.BackgroundColor3 = c
+	end)
+	UI.indicator, UI.glow = indicator, glow
+
+	local labels = { Powers = "POWER", Weapons = "ARMS", Settings = "SET" }
+	local function tabY(idx)
+		return 8 + (idx - 1) * 54
+	end
+	UI.tabs = {}
+	UI.badges = {}
+	for idx, name in ipairs(TAB_ORDER) do
+		local b = new("TextButton", {
+			Position = UDim2.fromOffset(0, tabY(idx)),
+			Size = UDim2.new(1, -1, 0, 50),
+			BackgroundTransparency = 1,
+			ZIndex = 6,
+			Parent = sidebar,
+		})
+		local icon = makeIcon(b, name)
+		local lbl = new("TextLabel", {
+			Position = UDim2.new(0, 0, 1, -16),
+			Size = UDim2.new(1, 0, 0, 10),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			TextSize = 8,
+			TextColor3 = THEME.dim,
+			Text = labels[name],
+			ZIndex = 7,
+			Parent = b,
+		})
+		local badge = new("TextLabel", {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -5, 0, 4),
+			Size = UDim2.fromOffset(16, 10),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			TextSize = 9,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			TextColor3 = THEME.faint,
+			Text = "",
+			ZIndex = 7,
+			Parent = b,
+		})
+		UI.badges[name] = badge
+		local tab = { btn = b, active = false }
+		function tab.paint(active)
+			tab.active = active
+			local c = active and THEME.accents[name] or THEME.dim
+			icon.paint(c)
+			lbl.TextColor3 = c
+		end
+		pressFx(b)
 		track(b.MouseEnter:Connect(function()
-			b.TextColor3 = hot
+			if not tab.active then
+				icon.paint(THEME.text)
+				lbl.TextColor3 = THEME.text
+			end
 		end))
 		track(b.MouseLeave:Connect(function()
-			b.TextColor3 = COLOR.dim
-		end))
-		track(b.MouseButton1Down:Connect(function()
-			b.TextTransparency = 0.5
-		end))
-		track(b.MouseButton1Up:Connect(function()
-			b.TextTransparency = 0
-		end))
-
-		if index > 1 then
-			solid(toolbar, COLOR.line, UDim2.new(0, 1, 0, 14), UDim2.new((index - 1) / 3, 0, 0.5, -7)).ZIndex = 12
-		end
-		return b
-	end
-
-	local refreshBtn = toolButton("RELOAD", 1)
-	local clearBtn = toolButton("DISPEL", 2)
-	local unloadBtn = toolButton("UNLOAD", 3, true)
-
-	-- footer status line
-	local footer = solid(window, COLOR.header, UDim2.new(1, 0, 0, FOOTER), UDim2.new(0, 0, 1, -FOOTER))
-	footer.Name = "Footer"
-	footer.ZIndex = 9
-	solid(footer, COLOR.line, UDim2.new(1, 0, 0, 1), UDim2.new()).ZIndex = 12
-
-	local statusLabel = Instance.new("TextLabel")
-	statusLabel.Name = "Status"
-	statusLabel.BackgroundTransparency = 1
-	statusLabel.Position = UDim2.fromOffset(12, 1)
-	statusLabel.Size = UDim2.new(1, -24, 1, -1)
-	statusLabel.Font = Enum.Font.Code
-	statusLabel.TextSize = 12
-	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-	statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
-	statusLabel.TextColor3 = COLOR.dim
-	statusLabel.Text = "> idle"
-	statusLabel.ZIndex = 12
-	statusLabel.Parent = footer
-
-	local function setStatus(text: string, color: Color3?)
-		statusLabel.Text = "> " .. text
-		statusLabel.TextColor3 = color or COLOR.dim
-	end
-
-	-- the list
-	local list = Instance.new("ScrollingFrame")
-	list.Name = "List"
-	list.BackgroundTransparency = 1
-	list.BorderSizePixel = 0
-	list.Position = UDim2.fromOffset(0, HEADER + TOOLBAR)
-	list.Size = UDim2.new(1, 0, 1, -(HEADER + TOOLBAR + FOOTER))
-	list.CanvasSize = UDim2.new()
-	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	list.ScrollingDirection = Enum.ScrollingDirection.Y
-	list.ScrollBarThickness = 2
-	list.ScrollBarImageColor3 = COLOR.accent
-	list.ElasticBehavior = Enum.ElasticBehavior.Never
-	list.ZIndex = 9
-	list.Parent = window
-
-	local listLayout = Instance.new("UIListLayout")
-	listLayout.FillDirection = Enum.FillDirection.Vertical
-	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	listLayout.Padding = UDim.new(0, 0)
-	listLayout.Parent = list
-
-	--// rows
-
-	local activeBtn = nil
-	local rows = {}
-
-	local function paintRow(btn: TextButton)
-		local r = rows[btn]
-		if not r then return end
-		local active = (btn == activeBtn)
-		r.bar.BackgroundTransparency = active and 0 or 1
-		r.name.TextColor3 = active and COLOR.accent or COLOR.text
-		r.index.TextColor3 = active and COLOR.accent or COLOR.dim
-		if active then
-			r.tag.Text = "ACTIVE"
-			r.tag.TextColor3 = COLOR.accent
-		else
-			r.tag.Text = r.hover and "RUN" or ""
-			r.tag.TextColor3 = COLOR.dim
-		end
-		btn.BackgroundColor3 = active and COLOR.rowActive or COLOR.rowHover
-		btn.BackgroundTransparency = (active or r.hover) and 0 or 1
-	end
-
-	local function setActive(btn: TextButton?)
-		local old = activeBtn
-		activeBtn = btn
-		if old and old.Parent then
-			paintRow(old)
-		end
-		if btn then
-			paintRow(btn)
-		end
-	end
-
-	local function flashRow(btn: TextButton)
-		local r = rows[btn]
-		if not r then return end
-		r.flash.BackgroundTransparency = 0.65
-		tweenTo(r.flash, { BackgroundTransparency = 1 }, 0.6)
-	end
-
-	local function makeRow(index: number, label: string)
-		local btn = Instance.new("TextButton")
-		btn.Name = "Row"
-		btn.AutoButtonColor = false
-		btn.BackgroundColor3 = COLOR.rowHover
-		btn.BackgroundTransparency = 1
-		btn.BorderSizePixel = 0
-		btn.Text = ""
-		btn.Size = UDim2.new(1, 0, 0, 36)
-		btn.LayoutOrder = index
-		btn.ZIndex = 12
-		btn:SetAttribute("Entry", true)
-		btn.Parent = list
-
-		local flash = solid(btn, COLOR.accent, UDim2.fromScale(1, 1), UDim2.new())
-		flash.BackgroundTransparency = 1
-		flash.ZIndex = 12
-
-		local bar = solid(btn, COLOR.accent, UDim2.fromOffset(3, 20), UDim2.new(0, 0, 0.5, -10))
-		bar.BackgroundTransparency = 1
-		bar.ZIndex = 14
-
-		local idx = Instance.new("TextLabel")
-		idx.BackgroundTransparency = 1
-		idx.Position = UDim2.fromOffset(14, 0)
-		idx.Size = UDim2.fromOffset(22, 36)
-		idx.Font = Enum.Font.Code
-		idx.TextSize = 12
-		idx.TextXAlignment = Enum.TextXAlignment.Left
-		idx.TextColor3 = COLOR.dim
-		idx.Text = string.format("%02d", index)
-		idx.ZIndex = 14
-		idx.Parent = btn
-
-		local name = Instance.new("TextLabel")
-		name.BackgroundTransparency = 1
-		name.Position = UDim2.fromOffset(44, 0)
-		name.Size = UDim2.new(1, -44 - 64, 1, 0)
-		name.Font = Enum.Font.GothamMedium
-		name.TextSize = 13
-		name.TextXAlignment = Enum.TextXAlignment.Left
-		name.TextTruncate = Enum.TextTruncate.AtEnd
-		name.TextColor3 = COLOR.text
-		name.Text = label
-		name.ZIndex = 14
-		name.Parent = btn
-
-		local tag = Instance.new("TextLabel")
-		tag.BackgroundTransparency = 1
-		tag.Position = UDim2.new(1, -64, 0, 0)
-		tag.Size = UDim2.fromOffset(52, 36)
-		tag.Font = Enum.Font.Code
-		tag.TextSize = 10
-		tag.TextXAlignment = Enum.TextXAlignment.Right
-		tag.TextColor3 = COLOR.dim
-		tag.Text = ""
-		tag.ZIndex = 14
-		tag.Parent = btn
-
-		solid(btn, COLOR.line, UDim2.new(1, -24, 0, 1), UDim2.new(0, 12, 1, -1)).ZIndex = 13
-
-		rows[btn] = { bar = bar, name = name, index = idx, tag = tag, flash = flash, hover = false }
-
-		track(btn.MouseEnter:Connect(function()
-			rows[btn].hover = true
-			paintRow(btn)
-		end))
-		track(btn.MouseLeave:Connect(function()
-			rows[btn].hover = false
-			paintRow(btn)
-		end))
-		return btn
-	end
-
-	--// window state: open / close, minimize
-
-	local isOpen = false
-	local minimized = false
-
-	local function metrics()
-		local vp = viewport()
-		local w = math.min(CONFIG.WindowWidth, vp.X - 56)
-		local y = CONFIG.TabY + CONFIG.TabHeight + 8
-		local h = math.max(160, math.min(CONFIG.WindowHeight, vp.Y - y - 8))
-		return w, y, h
-	end
-
-	local function openGoal()
-		local w, y, h = metrics()
-		return UDim2.new(1, -8, 0, y), UDim2.fromOffset(w, minimized and HEADER or h)
-	end
-
-	local function closedPos()
-		local w, y = metrics()
-		return UDim2.new(1, w + 16, 0, y)
-	end
-
-	local function setOpen(open: boolean)
-		isOpen = open
-		tab.Text = open and ">" or "<"
-		if open then
-			local pos, sz = openGoal()
-			if not window.Visible then
-				window.Size = sz
-				window.Position = closedPos()
-				window.Visible = true
+			if not tab.active then
+				icon.paint(THEME.dim)
+				lbl.TextColor3 = THEME.dim
 			end
-			tweenTo(window, { Position = pos, Size = sz })
-		else
-			tweenTo(window, { Position = closedPos() })
-			task.delay(CONFIG.SlideSpeed + 0.05, function()
-				if not isOpen and window then
-					window.Visible = false
-				end
-			end)
-		end
+		end))
+		track(b.Activated:Connect(function()
+			UI.switchTo(name)
+		end))
+		UI.tabs[name] = tab
 	end
 
-	local function setMinimized(state: boolean)
-		minimized = state
-		if state then
-			task.delay(CONFIG.SlideSpeed + 0.05, function()
-				if minimized then
-					toolbar.Visible = false
-					footer.Visible = false
-					list.Visible = false
-				end
-			end)
-		else
-			toolbar.Visible = true
-			footer.Visible = true
-			list.Visible = true
-		end
-		-- the minimize mark becomes a box edge when collapsed
-		for _, m in ipairs(minMarks) do
-			m.Size = state and UDim2.fromOffset(10, 8) or UDim2.fromOffset(10, 2)
-			m.Position = state and UDim2.new(0.5, -5, 0.5, -4) or UDim2.new(0.5, -5, 0.5, -1)
-		end
-		if isOpen then
-			local pos, sz = openGoal()
-			tweenTo(window, { Position = pos, Size = sz })
-		end
+	new("TextLabel", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 1, -36),
+		Size = UDim2.fromOffset(60, 12),
+		Rotation = -90,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		TextSize = 9,
+		TextColor3 = THEME.faint,
+		Text = "DUAKNO",
+		ZIndex = 5,
+		Parent = sidebar,
+	})
+
+	-- footer
+	local footer = new("Frame", {
+		Name = "Footer",
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.fromScale(0, 1),
+		Size = UDim2.new(1, 0, 0, FOOTER),
+		BackgroundColor3 = THEME.panel,
+		ZIndex = 5,
+		Parent = window,
+	})
+	new("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = THEME.line, ZIndex = 6, Parent = footer })
+	local statusLabel = new("TextLabel", {
+		Position = UDim2.fromOffset(12, 1),
+		Size = UDim2.new(1, -190, 1, -1),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextColor3 = THEME.dim,
+		Text = "> idle",
+		ZIndex = 6,
+		Parent = footer,
+	})
+	local footRight = new("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -12, 0, 1),
+		Size = UDim2.fromOffset(170, FOOTER - 1),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextColor3 = THEME.faint,
+		ZIndex = 6,
+		Parent = footer,
+	})
+	function UI.setStatus(text, color)
+		statusLabel.Text = "> " .. text
+		statusLabel.TextColor3 = color or THEME.dim
 	end
+	function UI.refreshFooter()
+		footRight.Text = string.format("%d ACTIVE   [%s]", Runner.count(), string.upper(State.toggleKey.Name))
+	end
+
+	-- pages
+	UI.browsers = {
+		Powers = createBrowser("Powers"),
+		Weapons = createBrowser("Weapons"),
+	}
+	UI.pages = {
+		Powers = UI.browsers.Powers.page,
+		Weapons = UI.browsers.Weapons.page,
+		Settings = createSettings().page,
+	}
+
+	-- launcher tab on the right edge
+	local tab = new("TextButton", {
+		Name = "Tab",
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, CONFIG.TabY),
+		Size = UDim2.fromOffset(24, 52),
+		BackgroundColor3 = THEME.panel,
+		ZIndex = 30,
+		Parent = gui,
+	})
+	corner(tab, 4)
+	local tabStroke = stroke(tab, THEME.line, 1)
+	local tabMark = new("Frame", {
+		Position = UDim2.new(0, 0, 0.5, -11),
+		Size = UDim2.fromOffset(2, 22),
+		BackgroundColor3 = Accent.color,
+		ZIndex = 31,
+		Parent = tab,
+	})
+	local chevron = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 1, 0.5, 0),
+		Size = UDim2.fromOffset(16, 16),
+		BackgroundTransparency = 1,
+		ZIndex = 31,
+		Parent = tab,
+	})
+	local chevParts = { bar(chevron, 9, 2, 0, -3, -45, THEME.dim), bar(chevron, 9, 2, 0, 3, 45, THEME.dim) }
+	for _, p in ipairs(chevParts) do p.ZIndex = 31 end
+	Accent.bind(function(c)
+		tabMark.BackgroundColor3 = c
+	end)
+	UI.chevron = chevron
+	track(tab.MouseEnter:Connect(function()
+		tw(tabStroke, { Color = Accent.color }, 0.12)
+		for _, p in ipairs(chevParts) do tw(p, { BackgroundColor3 = Accent.color }, 0.12) end
+	end))
+	track(tab.MouseLeave:Connect(function()
+		tw(tabStroke, { Color = THEME.line }, 0.15)
+		for _, p in ipairs(chevParts) do tw(p, { BackgroundColor3 = THEME.dim }, 0.15) end
+	end))
+	track(tab.Activated:Connect(function()
+		UI.setOpen(not UI.isOpen)
+	end))
+	pressFx(tab)
+
+	-- window controls wiring
+	track(closeBtn.Activated:Connect(function()
+		UI.setOpen(false)
+	end))
+	track(minBtn.Activated:Connect(function()
+		UI.setMinimized(not UI.minimized)
+	end))
+
+	function UI.tabY(idx)
+		return tabY(idx)
+	end
+end
+
+--// ============================== window logic ==============================
+
+UI.isOpen = false
+UI.minimized = false
+UI.current = nil
+UI.scanning = false
+
+function UI.relayout()
+	if not State.gui then return end
+	local vp = viewport()
+	local us = State.settings.Scale
+	local uw = math.max(300, math.min(CONFIG.WindowWidth, (vp.X - 16) / us))
+	local uh = math.max(220, math.min(CONFIG.WindowHeight, (vp.Y - 16) / us))
+	UI.uw, UI.uh = uw, uh
+	UI.shell.Size = UDim2.fromOffset(uw, UI.minimized and HEADER or uh)
+	UI.scaler.Scale = UI.isOpen and us or us * 0.94
+	for _, b in pairs(UI.browsers) do
+		b.layout(uw - SIDE, uh - HEADER - FOOTER)
+	end
+end
+
+function UI.setOpen(open)
+	UI.isOpen = open
+	local us = State.settings.Scale
+	tw(UI.chevron, { Rotation = open and 180 or 0 }, 0.3)
+	if open then
+		UI.shell.Visible = true
+		UI.relayout()
+		UI.scaler.Scale = us * 0.94
+		setGroup(UI.window, 1)
+		UI.halo.BackgroundTransparency = 1
+		UI.haloStroke.Transparency = 1
+		tw(UI.scaler, { Scale = us }, 0.4, Enum.EasingStyle.Back)
+		fadeGroup(UI.window, 0, 0.3)
+		tw(UI.halo, { BackgroundTransparency = 0.95 }, 0.4)
+		tw(UI.haloStroke, { Transparency = 0.85 }, 0.4)
+		local b = UI.browsers[UI.current]
+		if b then b.onShow() end
+	else
+		tw(UI.scaler, { Scale = us * 0.94 }, 0.25)
+		fadeGroup(UI.window, 1, 0.22)
+		tw(UI.halo, { BackgroundTransparency = 1 }, 0.22)
+		tw(UI.haloStroke, { Transparency = 1 }, 0.22)
+		task.delay(State.settings.Animations and 0.28 or 0.02, function()
+			if not UI.isOpen and UI.shell then
+				UI.shell.Visible = false
+			end
+		end)
+	end
+end
+
+function UI.setMinimized(state)
+	UI.minimized = state
+	for _, m in ipairs(UI.minMarks) do
+		tw(m, {
+			Size = state and UDim2.fromOffset(10, 8) or UDim2.fromOffset(10, 2),
+		}, 0.2)
+	end
+	tw(UI.shell, { Size = UDim2.fromOffset(UI.uw, state and HEADER or UI.uh) }, 0.3)
+end
+
+function UI.switchTo(name, instant)
+	if UI.current == name then return end
+	local old = UI.current
+	UI.current = name
+	Accent.set(THEME.accents[name], instant)
+	local idx = TAB_INDEX[name]
+	tw(UI.indicator, { Position = UDim2.fromOffset(0, UI.tabY(idx) + 10) }, 0.35, Enum.EasingStyle.Back)
+	tw(UI.glow, { Position = UDim2.fromOffset(0, UI.tabY(idx) + 10) }, 0.35, Enum.EasingStyle.Back)
+	for tabName, t in pairs(UI.tabs) do
+		t.paint(tabName == name)
+	end
+
+	local newPage = UI.pages[name]
+	local dir = (old and TAB_INDEX[name] > TAB_INDEX[old]) and 1 or -1
+	if old then
+		local oldPage = UI.pages[old]
+		tw(oldPage, { Position = UDim2.fromOffset(-dir * 22, 0) }, 0.22)
+		fadeGroup(oldPage, 1, 0.18)
+		task.delay(State.settings.Animations and 0.24 or 0.02, function()
+			if UI.current ~= old then
+				oldPage.Visible = false
+			end
+		end)
+	end
+	newPage.Position = UDim2.fromOffset(dir * 22, 0)
+	setGroup(newPage, 1)
+	newPage.Visible = true
+	tw(newPage, { Position = UDim2.new() }, 0.32)
+	fadeGroup(newPage, 0, 0.26)
+
+	local b = UI.browsers[name]
+	if b then
+		b.onShow()
+	else
+		State.spin = nil
+	end
+end
+
+function UI.updateCounts()
+	for kind, badge in pairs(UI.badges) do
+		local b = UI.browsers[kind]
+		badge.Text = b and tostring(#b.rows) or ""
+	end
+end
+
+function UI.populate()
+	if UI.scanning or not State.alive then return end
+	UI.scanning = true
+	status("scanning repo...")
+	local raw = {}
+	local err = Repo.scan(CONFIG.StartPath, 0, raw)
+	if not State.alive then return end
+	if err and #raw == 0 then
+		status("scan failed: " .. err, THEME.bad)
+		UI.scanning = false
+		return
+	end
+	table.sort(raw, function(a, b)
+		return string.lower(a.path) < string.lower(b.path)
+	end)
+	State.entries = Repo.build(raw)
+	for kind, b in pairs(UI.browsers) do
+		local list = {}
+		for _, e in ipairs(State.entries) do
+			if e.kind == kind then
+				table.insert(list, e)
+			end
+		end
+		b.load(list)
+	end
+	UI.updateCounts()
+	UI.refreshFooter()
+	if #State.entries == 0 then
+		status("no scripts found", THEME.bad)
+	else
+		status(#State.entries .. " scripts loaded")
+	end
+	UI.scanning = false
+end
+
+local function creditNotifications()
+	task.spawn(function()
+		local icon
+		pcall(function()
+			local uid = Players:GetUserIdFromNameAsync(CONFIG.Credit.UserName)
+			icon = Players:GetUserThumbnailAsync(uid, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+		end)
+		if icon then
+			State.avatar = icon
+			if UI.avatarImage then
+				UI.avatarImage.Image = icon
+			end
+		end
+		local function send(title, text, withIcon)
+			for _ = 1, 3 do
+				local ok = pcall(function()
+					StarterGui:SetCore("SendNotification", {
+						Title = title,
+						Text = text,
+						Duration = 6,
+						Icon = withIcon and icon or nil,
+					})
+				end)
+				if ok then return end
+				task.wait(0.5)
+			end
+		end
+		send("Powers and weapons hub", "By DuaKNo", true)
+		task.wait(0.4)
+		send("Follow on Instagram", CONFIG.Credit.Instagram, false)
+		task.wait(0.4)
+		send("Join Discord server for more", CONFIG.Credit.Discord, false)
+	end)
+end
+
+--// ============================== boot ==============================
+
+local function main()
+	loadSettings()
+	buildUI()
+
+	table.insert(Runner.listeners, function()
+		for _, b in pairs(UI.browsers) do
+			b.repaint()
+		end
+		UI.refreshFooter()
+	end)
+
+	-- animated bits: one heartbeat, only while the window is visible
+	local clock = 0
+	track(RunService.Heartbeat:Connect(function(dt)
+		if not State.alive or not UI.shell.Visible or UI.minimized then return end
+		if not State.settings.Animations then return end
+		clock += dt
+		UI.strokeGrad.Rotation = (clock * 36) % 360
+		UI.sweepGrad.Offset = Vector2.new(((clock * 0.45) % 2) - 1, 0)
+		local spin = State.spin
+		if spin and spin.outer and spin.outer.Parent then
+			spin.outer.Rotation = 45 + clock * 18
+			if spin.inner then
+				spin.inner.Rotation = -clock * 28
+			end
+		end
+		if State.settings.Particles then
+			for _, p in ipairs(UI.particles) do
+				p.y -= p.speed * dt
+				if p.y < -0.05 then
+					p.y = 1.05
+					p.x = math.random()
+				end
+				p.f.Position = UDim2.fromScale(p.x + math.sin(clock * 0.6 + p.phase) * p.sway, p.y)
+				p.f.BackgroundTransparency = 0.8 + 0.15 * math.sin(clock * 1.3 + p.phase)
+			end
+		end
+	end))
+
+	track(UserInputService.InputBegan:Connect(function(input, processed)
+		if State.binding then
+			if input.UserInputType == Enum.UserInputType.Keyboard then
+				State.binding = false
+				if input.KeyCode ~= Enum.KeyCode.Escape then
+					State.toggleKey = input.KeyCode
+					State.settings.ToggleKey = input.KeyCode.Name
+					saveSettings()
+				end
+				UI.keyBtn.Text = string.upper(State.toggleKey.Name)
+				UI.refreshFooter()
+			end
+			return
+		end
+		if processed or UserInputService:GetFocusedTextBox() then return end
+		if input.KeyCode == State.toggleKey then
+			UI.setOpen(not UI.isOpen)
+		end
+	end))
 
 	pcall(function()
 		local cam = workspace.CurrentCamera
 		if cam then
 			track(cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
-				if isOpen then
-					local pos, sz = openGoal()
-					window.Position = pos
-					window.Size = sz
-				end
+				UI.relayout()
 			end))
 		end
 	end)
 
-	--// remove the previous script: tools, guis, threads, connections
-	--// nothing here touches the script's environment
-
-	local function snapshot()
-		local set = {}
-		local lp = Players.LocalPlayer
-		local function take(root: Instance?, tools: boolean, guis: boolean)
-			if not root then return end
-			for _, c in ipairs(root:GetChildren()) do
-				if tools and (c:IsA("Tool") or c:IsA("HopperBin")) then
-					set[c] = true
-				elseif guis and c:IsA("ScreenGui") and c ~= gui then
-					set[c] = true
-				end
-			end
-		end
-		take(lp:FindFirstChildOfClass("Backpack"), true, false)
-		take(lp.Character, true, false)
-		take(lp:FindFirstChildOfClass("PlayerGui"), false, true)
-		take(CoreGui, false, true)
-		if gethui then
-			local ok, h = pcall(gethui)
-			if ok and h then
-				take(h, false, true)
-			end
-		end
-		return set
-	end
-
-	local function chunkSource(f)
-		local ok, s = pcall(function()
-			return debug.info(f, "s")
-		end)
-		if ok and type(s) == "string" then
-			return s
-		end
-		if getinfo then
-			local ok2, info = pcall(getinfo, f)
-			if ok2 and type(info) == "table" then
-				return info.source
-			end
-		end
-		return nil
-	end
-
-	local function signalList()
-		local sigs = {}
-		local function add(sig)
-			if sig then
-				table.insert(sigs, sig)
-			end
-		end
-		pcall(function()
-			add(RunService.Heartbeat)
-			add(RunService.RenderStepped)
-			add(RunService.Stepped)
-		end)
-		pcall(function() add(RunService.PreSimulation) end)
-		pcall(function() add(RunService.PostSimulation) end)
-		pcall(function()
-			add(UserInputService.InputBegan)
-			add(UserInputService.InputEnded)
-			add(UserInputService.InputChanged)
-			add(UserInputService.JumpRequest)
-		end)
-		pcall(function()
-			local lp = Players.LocalPlayer
-			add(lp.CharacterAdded)
-			add(lp.CharacterRemoving)
-			add(lp.Chatted)
-			local mouse = lp:GetMouse()
-			add(mouse.Button1Down)
-			add(mouse.Button1Up)
-			add(mouse.Move)
-			local ch = lp.Character
-			if ch then
-				local hum = ch:FindFirstChildOfClass("Humanoid")
-				if hum then
-					add(hum.Died)
-					add(hum.StateChanged)
-					add(hum.Running)
-					add(hum.Jumping)
-				end
-				add(ch.DescendantAdded)
-			end
-		end)
-		return sigs
-	end
-
-	local function killConnections(src: string?)
-		if not src or not getconnections then return end
-		for _, sig in ipairs(signalList()) do
-			local ok, conns = pcall(getconnections, sig)
-			if ok and type(conns) == "table" then
-				for _, conn in ipairs(conns) do
-					local f = conn.Function
-					if f and chunkSource(f) == src then
-						pcall(function() conn:Disconnect() end)
-					end
-				end
-			end
-		end
-	end
-
-	local function killThreads(src: string?)
-		if not src or not getgc then return end
-		local ok, objs = pcall(getgc, true)
-		if not ok or type(objs) ~= "table" then return end
-		local me = coroutine.running()
-		for _, o in ipairs(objs) do
-			if type(o) == "thread" and o ~= me then
-				for level = 0, 6 do
-					local okInfo, s = pcall(function()
-						return debug.info(o, level, "s")
-					end)
-					if not okInfo or s == nil then
-						break
-					end
-					if s == src then
-						pcall(task.cancel, o)
-						break
-					end
-				end
-			end
-		end
-	end
-
-	local currentRun = nil
-
-	local function finalizeRun(run)
-		if run.finalized then return end
-		run.finalized = true
-		local after = snapshot()
-		for inst in pairs(after) do
-			if not run.before[inst] then
-				run.created[inst] = true
-			end
-		end
-		run.before = nil
-	end
-
-	local function stopCurrent(): boolean
-		local run = currentRun
-		if not run then
-			return false
-		end
-		currentRun = nil
-		finalizeRun(run)
-		for _, th in ipairs(run.threads) do
-			pcall(task.cancel, th)
-		end
-		killThreads(run.source)
-		killConnections(run.source)
-		for inst in pairs(run.created) do
-			pcall(function() inst:Destroy() end)
-		end
-		setActive(nil)
-		return true
-	end
-
-	--// run a repo file
-
-	local busy = false
-
-	local function runEntry(entry, btn: TextButton)
-		if busy then return end
-		busy = true
-		setStatus("fetching " .. entry.name .. "...")
-
-		local src = httpGet(entry.url, false)
-		if not src then
-			setStatus("fetch failed: " .. entry.name, COLOR.bad)
-			notify("spells", "failed to fetch " .. entry.name)
-			busy = false
-			return
-		end
-
-		local fn, compileErr = loadstring(src, "=repohub_" .. entry.name)
-		if not fn then
-			setStatus("compile error: " .. entry.name, COLOR.bad)
-			notify("spells", "compile error in " .. entry.name)
-			warn("[spells] " .. tostring(compileErr))
-			busy = false
-			return
-		end
-
-		stopCurrent()
-
-		local run = {
-			name = entry.name,
-			path = entry.path,
-			threads = {},
-			created = {},
-			before = snapshot(),
-			source = chunkSource(fn),
-			finalized = false,
-		}
-		currentRun = run
-		setActive(btn)
-		flashRow(btn)
-
-		local th = task.spawn(function()
-			local ok, runErr = pcall(fn)
-			if ok then
-				setStatus("running " .. entry.name, COLOR.good)
-				notify("spells", "running " .. entry.name)
-			else
-				setStatus("runtime error: " .. entry.name, COLOR.bad)
-				notify("spells", "runtime error in " .. entry.name)
-				warn("[spells] " .. tostring(runErr))
-			end
-		end)
-		table.insert(run.threads, th)
-
-		task.delay(CONFIG.SettleTime, function()
-			if currentRun == run then
-				finalizeRun(run)
-			end
-		end)
-
-		busy = false
-	end
-
-	--// list
-
-	local loaded = false
-	local scanning = false
-
-	local function clearEntries()
-		for _, child in ipairs(list:GetChildren()) do
-			if child:IsA("TextButton") and child:GetAttribute("Entry") then
-				if child == activeBtn then
-					activeBtn = nil
-				end
-				rows[child] = nil
-				child:Destroy()
-			end
-		end
-	end
-
-	local function populate()
-		if scanning then return end
-		scanning = true
-		clearEntries()
-		setStatus("scanning repo...")
-		local entries = {}
-		local err = scan(CONFIG.StartPath, 0, entries)
-
-		if err and #entries == 0 then
-			setStatus("scan failed: " .. err, COLOR.bad)
-			loaded = false
-			scanning = false
-			return
-		end
-
-		table.sort(entries, function(a, b)
-			return string.lower(a.path) < string.lower(b.path)
-		end)
-
-		for i, entry in ipairs(entries) do
-			local label = string.gsub(entry.path, "%.%w+$", "")
-			local btn = makeRow(i, label)
-
-			if currentRun and currentRun.path == entry.path then
-				setActive(btn)
-			end
-
-			track(btn.MouseButton1Click:Connect(function()
-				runEntry(entry, btn)
-			end))
-		end
-
-		loaded = #entries > 0
-		if #entries == 0 then
-			setStatus("no scripts found", COLOR.bad)
-		else
-			setStatus(#entries .. " script(s) loaded")
-		end
-		scanning = false
-	end
-
-	--// wiring
-
-	track(tab.MouseButton1Click:Connect(function()
-		local willOpen = not isOpen
-		setOpen(willOpen)
-		if willOpen and not loaded then
-			task.spawn(populate)
-		end
-	end))
-
-	track(closeBtn.MouseButton1Click:Connect(function()
-		setOpen(false)
-	end))
-
-	track(minBtn.MouseButton1Click:Connect(function()
-		setMinimized(not minimized)
-	end))
-
-	track(refreshBtn.MouseButton1Click:Connect(function()
-		task.spawn(populate)
-	end))
-
-	track(clearBtn.MouseButton1Click:Connect(function()
-		if stopCurrent() then
-			setStatus("removed the active script")
-			notify("spells", "removed the active script")
-		else
-			setStatus("nothing active")
-		end
-	end))
-
-	track(unloadBtn.MouseButton1Click:Connect(function()
-		cleanup()
-	end))
-
-	task.spawn(populate)
+	UI.relayout()
+	UI.switchTo("Powers", true)
+	UI.refreshFooter()
+	UI.setOpen(true)
+	creditNotifications()
+	task.spawn(UI.populate)
 end
 
 local ok, err = pcall(main)
