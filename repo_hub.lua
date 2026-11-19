@@ -333,7 +333,7 @@ local function main()
 	-- toolbar: plain text actions split by thin dividers
 	local toolbar = solid(window, COLOR.window, UDim2.new(1, 0, 0, TOOLBAR), UDim2.fromOffset(0, HEADER))
 	toolbar.Name = "Toolbar"
-	toolbar.ZIndex = 11
+	toolbar.ZIndex = 9
 	solid(toolbar, COLOR.line, UDim2.new(1, 0, 0, 1), UDim2.new(0, 0, 1, -1)).ZIndex = 12
 
 	local function toolButton(text: string, index: number, danger: boolean?)
@@ -377,7 +377,7 @@ local function main()
 	-- footer status line
 	local footer = solid(window, COLOR.header, UDim2.new(1, 0, 0, FOOTER), UDim2.new(0, 0, 1, -FOOTER))
 	footer.Name = "Footer"
-	footer.ZIndex = 11
+	footer.ZIndex = 9
 	solid(footer, COLOR.line, UDim2.new(1, 0, 0, 1), UDim2.new()).ZIndex = 12
 
 	local statusLabel = Instance.new("TextLabel")
@@ -412,7 +412,7 @@ local function main()
 	list.ScrollBarThickness = 2
 	list.ScrollBarImageColor3 = COLOR.accent
 	list.ElasticBehavior = Enum.ElasticBehavior.Never
-	list.ZIndex = 11
+	list.ZIndex = 9
 	list.Parent = window
 
 	local listLayout = Instance.new("UIListLayout")
@@ -582,6 +582,19 @@ local function main()
 
 	local function setMinimized(state: boolean)
 		minimized = state
+		if state then
+			task.delay(CONFIG.SlideSpeed + 0.05, function()
+				if minimized then
+					toolbar.Visible = false
+					footer.Visible = false
+					list.Visible = false
+				end
+			end)
+		else
+			toolbar.Visible = true
+			footer.Visible = true
+			list.Visible = true
+		end
 		-- the minimize mark becomes a box edge when collapsed
 		for _, m in ipairs(minMarks) do
 			m.Size = state and UDim2.fromOffset(10, 8) or UDim2.fromOffset(10, 2)
