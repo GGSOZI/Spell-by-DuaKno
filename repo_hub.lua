@@ -1,6 +1,6 @@
---// repo hub: fixed widget opens a Dex++ styled window with a vertical script list (client side)
---// title bar: < > dock left/right, - minimize, X close
---// running a new script stops and removes the previous one's tools, guis, threads and connections
+--// spellbook hub: a < tab in the top right corner opens an arcane Dex++ styled window (client side)
+--// lists every script in your repo as a spell, tap one to cast it
+--// casting a new spell removes the previous one's tools, guis, threads and connections
 
 local cloneref = cloneref or function(x) return x end
 
@@ -23,32 +23,30 @@ local CONFIG = {
 	Extensions = { lua = true, luau = true, txt = true },
 	AllowNoExtension = true,   -- files with no extension, like "1 Snowgrave and Iceshock by DuaKNo"
 
-	PositionX = 8,             -- fixed spot of the widget
-	PositionY = 12,
-	ButtonSize = 44,
+	TabY = 12,                 -- height of the < tab from the top of the screen
+	TabHeight = 46,
 	WindowWidth = 300,
 	WindowHeight = 380,
-	DefaultDock = "right",     -- "right" or "left"
 	SlideSpeed = 0.22,
-	SettleTime = 1.5,          -- seconds after a run that new tools/guis count as that script's
+	SettleTime = 1.5,          -- seconds after a cast that new tools/guis count as that spell's
 }
 
--- Dex++ palette
+-- arcane palette on the Dex++ layout
 local DEX = {
-	Main1 = Color3.fromRGB(52, 52, 52),
-	Main2 = Color3.fromRGB(45, 45, 45),
-	Outline1 = Color3.fromRGB(33, 33, 33),
-	Outline2 = Color3.fromRGB(55, 55, 55),
-	Button = Color3.fromRGB(60, 60, 60),
-	ButtonHover = Color3.fromRGB(68, 68, 68),
-	ButtonPress = Color3.fromRGB(40, 40, 40),
-	Selection = Color3.fromRGB(11, 90, 175),
-	Text = Color3.fromRGB(255, 255, 255),
-	Sub = Color3.fromRGB(170, 170, 170),
-	Good = Color3.fromRGB(173, 241, 149),
-	Important = Color3.fromRGB(255, 0, 0),
-	CloseHover = Color3.fromRGB(196, 43, 28),
-	Icon = Color3.fromRGB(18, 18, 21),
+	Main1 = Color3.fromRGB(40, 26, 82),
+	Main2 = Color3.fromRGB(24, 17, 44),
+	Outline1 = Color3.fromRGB(70, 50, 130),
+	Outline2 = Color3.fromRGB(90, 64, 170),
+	Button = Color3.fromRGB(48, 36, 84),
+	ButtonHover = Color3.fromRGB(68, 52, 118),
+	ButtonPress = Color3.fromRGB(34, 26, 60),
+	Selection = Color3.fromRGB(122, 64, 255),
+	Glow = Color3.fromRGB(150, 100, 255),
+	Text = Color3.fromRGB(240, 235, 255),
+	Sub = Color3.fromRGB(170, 160, 205),
+	Good = Color3.fromRGB(160, 255, 210),
+	Important = Color3.fromRGB(255, 90, 120),
+	CloseHover = Color3.fromRGB(196, 43, 70),
 }
 
 local alive = true
@@ -176,20 +174,31 @@ local function main()
 		gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
 	end
 
-	local size = CONFIG.ButtonSize
-	local TOP = 28 -- title bar height
-
-	local function circle(parent: Instance)
-		local c = Instance.new("UICorner")
-		c.CornerRadius = UDim.new(1, 0)
-		c.Parent = parent
-	end
+	local TOP = 30 -- title bar height
 
 	local function pad(parent: Instance, left: number, right: number)
 		local p = Instance.new("UIPadding")
 		p.PaddingLeft = UDim.new(0, left)
 		p.PaddingRight = UDim.new(0, right)
 		p.Parent = parent
+	end
+
+	local function stroke(parent: Instance, color: Color3, thickness: number, transparency: number)
+		local s = Instance.new("UIStroke")
+		s.Color = color
+		s.Thickness = thickness
+		s.Transparency = transparency
+		s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		s.Parent = parent
+		return s
+	end
+
+	local function gradient(parent: Instance, a: Color3, b: Color3, rotation: number)
+		local g = Instance.new("UIGradient")
+		g.Color = ColorSequence.new(a, b)
+		g.Rotation = rotation
+		g.Parent = parent
+		return g
 	end
 
 	local function viewport(): Vector2
@@ -207,88 +216,67 @@ local function main()
 		return tw
 	end
 
-	-- widget, same structure as the one you copied
-	local widget = Instance.new("Frame")
-	widget.Name = "Widget"
-	widget.BackgroundTransparency = 1
-	widget.Size = UDim2.fromOffset(size, size)
-	widget.Position = UDim2.fromOffset(CONFIG.PositionX, CONFIG.PositionY)
-	widget.ZIndex = 20
-	widget.Parent = gui
+	-- the < tab in the top right corner
+	local tab = Instance.new("TextButton")
+	tab.Name = "Tab"
+	tab.AutoButtonColor = false
+	tab.AnchorPoint = Vector2.new(1, 0)
+	tab.Position = UDim2.new(1, 0, 0, CONFIG.TabY)
+	tab.Size = UDim2.fromOffset(30, CONFIG.TabHeight)
+	tab.BackgroundColor3 = DEX.Main1
+	tab.BackgroundTransparency = 0.05
+	tab.BorderSizePixel = 0
+	tab.Font = Enum.Font.SourceSansBold
+	tab.TextSize = 24
+	tab.TextColor3 = DEX.Text
+	tab.Text = "<"
+	tab.ZIndex = 30
+	tab.Parent = gui
 
-	local iconButton = Instance.new("Frame")
-	iconButton.Name = "IconButton"
-	iconButton.BackgroundColor3 = DEX.Icon
-	iconButton.BackgroundTransparency = 0.08
-	iconButton.BorderSizePixel = 0
-	iconButton.ClipsDescendants = true
-	iconButton.Size = UDim2.fromScale(1, 1)
-	iconButton.ZIndex = 2
-	iconButton.Parent = widget
-	circle(iconButton)
+	do
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0, 8)
+		c.Parent = tab
+	end
+	gradient(tab, Color3.fromRGB(96, 56, 190), Color3.fromRGB(40, 26, 82), 90)
+	local tabStroke = stroke(tab, DEX.Glow, 1.5, 0.3)
 
-	local overlay = Instance.new("Frame")
-	overlay.Name = "IconOverlay"
-	overlay.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-	overlay.BackgroundTransparency = 0.85
-	overlay.BorderSizePixel = 0
-	overlay.Size = UDim2.fromScale(1, 1)
-	overlay.Visible = false
-	overlay.ZIndex = 6
-	overlay.Parent = iconButton
-	circle(overlay)
-
-	local iconImage = Instance.new("ImageLabel")
-	iconImage.Name = "IconImage"
-	iconImage.AnchorPoint = Vector2.new(0.5, 0.5)
-	iconImage.BackgroundTransparency = 1
-	iconImage.Position = UDim2.fromScale(0.5, 0.5)
-	iconImage.Size = UDim2.fromScale(0.5, 0.5)
-	iconImage.Image = "http://www.roblox.com/asset/?id=6031280882"
-	iconImage.ZIndex = 15
-	iconImage.Parent = widget
-
-	local clickRegion = Instance.new("TextButton")
-	clickRegion.Name = "ClickRegion"
-	clickRegion.BackgroundTransparency = 1
-	clickRegion.Size = UDim2.fromScale(1, 1)
-	clickRegion.Text = ""
-	clickRegion.ZIndex = 20
-	clickRegion.Parent = widget
-
-	-- window, Dex++ look: Main1 title bar, Main2 body, Outline1 border
+	-- window: Dex++ layout, Main1 title bar, Main2 body, outlined
 	local window = Instance.new("Frame")
 	window.Name = "Window"
-	window.BackgroundColor3 = DEX.Main2
-	window.BackgroundTransparency = 0.1
-	window.BorderColor3 = DEX.Outline1
-	window.BorderSizePixel = 1
+	window.AnchorPoint = Vector2.new(1, 0)
+	window.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	window.BackgroundTransparency = 0.04
+	window.BorderSizePixel = 0
 	window.ClipsDescendants = true
 	window.Size = UDim2.fromOffset(CONFIG.WindowWidth, CONFIG.WindowHeight)
-	window.Position = UDim2.fromOffset(0, 0)
+	window.Position = UDim2.new(1, CONFIG.WindowWidth + 16, 0, CONFIG.TabY + CONFIG.TabHeight + 8)
 	window.Visible = false
 	window.ZIndex = 10
 	window.Parent = gui
+	gradient(window, Color3.fromRGB(32, 22, 58), Color3.fromRGB(16, 12, 30), 90)
+	stroke(window, DEX.Glow, 1.5, 0.35)
 
 	local topBar = Instance.new("Frame")
 	topBar.Name = "TopBar"
-	topBar.BackgroundColor3 = DEX.Main1
+	topBar.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 	topBar.BorderSizePixel = 0
 	topBar.Size = UDim2.new(1, 0, 0, TOP)
 	topBar.ZIndex = 11
 	topBar.Parent = window
+	gradient(topBar, Color3.fromRGB(96, 56, 190), Color3.fromRGB(40, 26, 82), 0)
 
 	local title = Instance.new("TextLabel")
 	title.Name = "Title"
 	title.BackgroundTransparency = 1
-	title.Position = UDim2.fromOffset(8, 0)
-	title.Size = UDim2.new(1, -8 - 28 * 4, 1, 0)
-	title.Font = Enum.Font.SourceSans
-	title.TextSize = 14
+	title.Position = UDim2.fromOffset(10, 0)
+	title.Size = UDim2.new(1, -10 - 28 * 2, 1, 0)
+	title.Font = Enum.Font.Fantasy
+	title.TextSize = 18
 	title.TextXAlignment = Enum.TextXAlignment.Left
 	title.TextTruncate = Enum.TextTruncate.AtEnd
 	title.TextColor3 = DEX.Text
-	title.Text = CONFIG.Repo
+	title.Text = "🔮 Spellbook"
 	title.ZIndex = 12
 	title.Parent = topBar
 
@@ -301,7 +289,7 @@ local function main()
 		b.Size = UDim2.new(0, 28, 1, 0)
 		b.Position = UDim2.new(1, -28 * indexFromRight, 0, 0)
 		b.Font = Enum.Font.SourceSansBold
-		b.TextSize = 16
+		b.TextSize = 18
 		b.TextColor3 = DEX.Text
 		b.Text = text
 		b.ZIndex = 12
@@ -326,8 +314,6 @@ local function main()
 
 	local closeBtn = titleButton("X", 1, DEX.CloseHover)
 	local minBtn = titleButton("-", 2)
-	local dockRightBtn = titleButton(">", 3)
-	local dockLeftBtn = titleButton("<", 4)
 
 	local body = Instance.new("Frame")
 	body.Name = "Body"
@@ -353,9 +339,8 @@ local function main()
 		btn.BorderColor3 = DEX.Outline2
 		btn.BorderSizePixel = 1
 		btn.Font = Enum.Font.SourceSans
-		btn.TextSize = 14
+		btn.TextSize = 15
 		btn.TextColor3 = DEX.Text
-		btn.TextTransparency = 0.1
 		btn.TextTruncate = Enum.TextTruncate.AtEnd
 		btn.Text = text
 		btn.LayoutOrder = order
@@ -381,14 +366,21 @@ local function main()
 		return btn
 	end
 
+	local function entryText(btn: TextButton, active: boolean)
+		local label = btn:GetAttribute("Label") or ""
+		btn.Text = (active and "⚡  " or "✨  ") .. label
+	end
+
 	local function setActive(btn: TextButton?)
 		local old = activeBtn
 		activeBtn = btn
 		if old and old.Parent then
 			old.BackgroundColor3 = DEX.Button
+			entryText(old, false)
 		end
 		if btn then
 			btn.BackgroundColor3 = DEX.Selection
+			entryText(btn, true)
 		end
 	end
 
@@ -407,8 +399,8 @@ local function main()
 	controlsLayout.Padding = UDim.new(0, 4)
 	controlsLayout.Parent = controls
 
-	local refreshBtn = makeButton(controls, "refresh", 1, 28)
-	local clearBtn = makeButton(controls, "clear", 2, 28)
+	local refreshBtn = makeButton(controls, "reload", 1, 28)
+	local clearBtn = makeButton(controls, "dispel", 2, 28)
 	local unloadBtn = makeButton(controls, "unload", 3, 28)
 	for _, b in ipairs({ refreshBtn, clearBtn, unloadBtn }) do
 		b.Size = UDim2.new(1 / 3, -3, 1, 0)
@@ -424,7 +416,7 @@ local function main()
 	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
 	statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
 	statusLabel.TextColor3 = DEX.Sub
-	statusLabel.Text = "ready"
+	statusLabel.Text = "the book is closed"
 	statusLabel.ZIndex = 11
 	statusLabel.Parent = body
 
@@ -433,11 +425,11 @@ local function main()
 		statusLabel.TextColor3 = color or DEX.Sub
 	end
 
-	-- vertical script list
+	-- vertical spell list
 	local list = Instance.new("ScrollingFrame")
 	list.Name = "List"
-	list.BackgroundColor3 = DEX.Main2
-	list.BackgroundTransparency = 0
+	list.BackgroundColor3 = Color3.fromRGB(16, 11, 30)
+	list.BackgroundTransparency = 0.1
 	list.BorderColor3 = DEX.Outline1
 	list.BorderSizePixel = 1
 	list.Position = UDim2.fromOffset(4, 58)
@@ -446,7 +438,7 @@ local function main()
 	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
 	list.ScrollingDirection = Enum.ScrollingDirection.Y
 	list.ScrollBarThickness = 3
-	list.ScrollBarImageColor3 = Color3.fromRGB(57, 57, 57)
+	list.ScrollBarImageColor3 = DEX.Glow
 	list.ElasticBehavior = Enum.ElasticBehavior.Never
 	list.ZIndex = 11
 	list.Parent = body
@@ -463,51 +455,42 @@ local function main()
 	listPadding.PaddingBottom = UDim.new(0, 3)
 	listPadding.Parent = list
 
-	--// window state: open / close, dock, minimize
+	--// window state: open / close, minimize
 
 	local isOpen = false
 	local minimized = false
-	local dock = (CONFIG.DefaultDock == "left") and "left" or "right"
 
-	local function windowRect()
+	local function metrics()
 		local vp = viewport()
-		local w = math.min(CONFIG.WindowWidth, vp.X - 16)
-		local y = CONFIG.PositionY + size + 8
+		local w = math.min(CONFIG.WindowWidth, vp.X - 56)
+		local y = CONFIG.TabY + CONFIG.TabHeight + 8
 		local h = math.max(140, math.min(CONFIG.WindowHeight, vp.Y - y - 8))
-		local x = (dock == "right") and (vp.X - w - 8) or CONFIG.PositionX
-		return x, y, w, h
+		return w, y, h
 	end
 
-	local function goalProps()
-		local x, y, w, h = windowRect()
-		return UDim2.fromOffset(x, y), UDim2.fromOffset(w, minimized and TOP or h)
+	local function openGoal()
+		local w, y, h = metrics()
+		return UDim2.new(1, -8, 0, y), UDim2.fromOffset(w, minimized and TOP or h)
 	end
 
-	local function paintDock()
-		dockRightBtn.TextColor3 = (dock == "right") and DEX.Sub or DEX.Text
-		dockLeftBtn.TextColor3 = (dock == "left") and DEX.Sub or DEX.Text
-	end
-	paintDock()
-
-	local function offscreenX(): number
-		local _, _, w = windowRect()
-		return (dock == "right") and viewport().X or -w - 8
+	local function closedPos()
+		local w, y = metrics()
+		return UDim2.new(1, w + 16, 0, y)
 	end
 
 	local function setOpen(open: boolean)
 		isOpen = open
-		overlay.Visible = open
+		tab.Text = open and ">" or "<"
 		if open then
-			local pos, sz = goalProps()
+			local pos, sz = openGoal()
 			if not window.Visible then
 				window.Size = sz
-				window.Position = UDim2.fromOffset(offscreenX(), pos.Y.Offset)
+				window.Position = closedPos()
 				window.Visible = true
 			end
 			tweenTo(window, { Position = pos, Size = sz })
 		else
-			local _, y = windowRect()
-			tweenTo(window, { Position = UDim2.fromOffset(offscreenX(), y) })
+			tweenTo(window, { Position = closedPos() })
 			task.delay(CONFIG.SlideSpeed + 0.03, function()
 				if not isOpen and window then
 					window.Visible = false
@@ -516,21 +499,11 @@ local function main()
 		end
 	end
 
-	local function setDock(side: string)
-		if dock == side then return end
-		dock = side
-		paintDock()
-		if isOpen then
-			local pos, sz = goalProps()
-			tweenTo(window, { Position = pos, Size = sz })
-		end
-	end
-
 	local function setMinimized(state: boolean)
 		minimized = state
 		minBtn.Text = state and "+" or "-"
 		if isOpen then
-			local pos, sz = goalProps()
+			local pos, sz = openGoal()
 			tweenTo(window, { Position = pos, Size = sz })
 		end
 	end
@@ -540,7 +513,7 @@ local function main()
 		if cam then
 			track(cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
 				if isOpen then
-					local pos, sz = goalProps()
+					local pos, sz = openGoal()
 					window.Position = pos
 					window.Size = sz
 				end
@@ -548,7 +521,18 @@ local function main()
 		end
 	end)
 
-	--// remove the previous script: tools, guis, threads, connections
+	-- the tab glows slowly
+	task.spawn(function()
+		local dim = false
+		while alive and gui do
+			tweenTo(tabStroke, { Transparency = dim and 0.15 or 0.75 }, 1.1)
+			dim = not dim
+			task.wait(1.1)
+		end
+	end)
+
+	--// remove the previous spell: tools, guis, threads, connections
+	--// nothing here touches the script's environment
 
 	local function snapshot()
 		local set = {}
@@ -651,39 +635,27 @@ local function main()
 		end
 	end
 
-	local function buildEnv(fn, bucket)
-		local okBase, base = pcall(getfenv, fn)
-		if not okBase or type(base) ~= "table" then
-			return nil
-		end
-		local function keep(th)
-			table.insert(bucket, th)
-			return th
-		end
-		local taskProxy = setmetatable({
-			spawn = function(f, ...) return keep(task.spawn(f, ...)) end,
-			defer = function(f, ...) return keep(task.defer(f, ...)) end,
-			delay = function(t, f, ...) return keep(task.delay(t, f, ...)) end,
-		}, { __index = task })
-		local coProxy = setmetatable({
-			create = function(f) return keep(coroutine.create(f)) end,
-			wrap = function(f)
-				local co = keep(coroutine.create(f))
-				return function(...)
-					local res = table.pack(coroutine.resume(co, ...))
-					if not res[1] then
-						error(res[2], 0)
+	local function killThreads(src: string?)
+		if not src or not getgc then return end
+		local ok, objs = pcall(getgc, true)
+		if not ok or type(objs) ~= "table" then return end
+		local me = coroutine.running()
+		for _, o in ipairs(objs) do
+			if type(o) == "thread" and o ~= me then
+				for level = 0, 6 do
+					local okInfo, s = pcall(function()
+						return debug.info(o, level, "s")
+					end)
+					if not okInfo or s == nil then
+						break
 					end
-					return table.unpack(res, 2, res.n)
+					if s == src then
+						pcall(task.cancel, o)
+						break
+					end
 				end
-			end,
-		}, { __index = coroutine })
-		return setmetatable({
-			task = taskProxy,
-			coroutine = coProxy,
-			spawn = taskProxy.spawn,
-			delay = taskProxy.delay,
-		}, { __index = base, __newindex = base })
+			end
+		end
 	end
 
 	local currentRun = nil
@@ -710,6 +682,7 @@ local function main()
 		for _, th in ipairs(run.threads) do
 			pcall(task.cancel, th)
 		end
+		killThreads(run.source)
 		killConnections(run.source)
 		for inst in pairs(run.created) do
 			pcall(function() inst:Destroy() end)
@@ -718,19 +691,19 @@ local function main()
 		return true
 	end
 
-	--// run a repo file
+	--// cast a repo file
 
 	local busy = false
 
 	local function runEntry(entry, btn: TextButton)
 		if busy then return end
 		busy = true
-		setStatus("fetching " .. entry.name .. "...")
+		setStatus("summoning " .. entry.name .. "...")
 
 		local src = httpGet(entry.url, false)
 		if not src then
 			setStatus("failed to fetch " .. entry.name, DEX.Important)
-			notify("repo hub", "failed to fetch " .. entry.name)
+			notify("spellbook", "failed to fetch " .. entry.name)
 			busy = false
 			return
 		end
@@ -738,8 +711,8 @@ local function main()
 		local fn, compileErr = loadstring(src, "=repohub_" .. entry.name)
 		if not fn then
 			setStatus("compile error in " .. entry.name, DEX.Important)
-			notify("repo hub", "compile error in " .. entry.name)
-			warn("[repo hub] " .. tostring(compileErr))
+			notify("spellbook", "compile error in " .. entry.name)
+			warn("[spellbook] " .. tostring(compileErr))
 			busy = false
 			return
 		end
@@ -758,20 +731,15 @@ local function main()
 		currentRun = run
 		setActive(btn)
 
-		local env = buildEnv(fn, run.threads)
-		if env then
-			pcall(setfenv, fn, env)
-		end
-
 		local th = task.spawn(function()
 			local ok, runErr = pcall(fn)
 			if ok then
-				setStatus("running " .. entry.name, DEX.Good)
-				notify("repo hub", "executed " .. entry.name)
+				setStatus("casting " .. entry.name, DEX.Good)
+				notify("spellbook", "cast " .. entry.name)
 			else
-				setStatus("runtime error in " .. entry.name, DEX.Important)
-				notify("repo hub", "runtime error in " .. entry.name)
-				warn("[repo hub] " .. tostring(runErr))
+				setStatus("the spell failed: " .. entry.name, DEX.Important)
+				notify("spellbook", "runtime error in " .. entry.name)
+				warn("[spellbook] " .. tostring(runErr))
 			end
 		end)
 		table.insert(run.threads, th)
@@ -805,7 +773,7 @@ local function main()
 		if scanning then return end
 		scanning = true
 		clearEntries()
-		setStatus("scanning repo...")
+		setStatus("searching the library...")
 		local entries = {}
 		local err = scan(CONFIG.StartPath, 0, entries)
 
@@ -822,8 +790,10 @@ local function main()
 
 		for i, entry in ipairs(entries) do
 			local label = string.gsub(entry.path, "%.%w+$", "")
-			local btn = makeButton(list, label, i, 30, true)
+			local btn = makeButton(list, "", i, 32, true)
 			btn:SetAttribute("Entry", true)
+			btn:SetAttribute("Label", label)
+			entryText(btn, false)
 
 			if currentRun and currentRun.path == entry.path then
 				setActive(btn)
@@ -836,23 +806,16 @@ local function main()
 
 		loaded = #entries > 0
 		if #entries == 0 then
-			setStatus("no scripts found in repo", DEX.Important)
+			setStatus("no spells found in the repo", DEX.Important)
 		else
-			setStatus(#entries .. " script(s)", DEX.Sub)
+			setStatus(#entries .. " spell(s) ready", DEX.Sub)
 		end
 		scanning = false
 	end
 
 	--// wiring
 
-	track(clickRegion.MouseEnter:Connect(function()
-		overlay.Visible = true
-	end))
-	track(clickRegion.MouseLeave:Connect(function()
-		overlay.Visible = isOpen
-	end))
-
-	track(clickRegion.MouseButton1Click:Connect(function()
+	track(tab.MouseButton1Click:Connect(function()
 		local willOpen = not isOpen
 		setOpen(willOpen)
 		if willOpen and not loaded then
@@ -868,24 +831,16 @@ local function main()
 		setMinimized(not minimized)
 	end))
 
-	track(dockRightBtn.MouseButton1Click:Connect(function()
-		setDock("right")
-	end))
-
-	track(dockLeftBtn.MouseButton1Click:Connect(function()
-		setDock("left")
-	end))
-
 	track(refreshBtn.MouseButton1Click:Connect(function()
 		task.spawn(populate)
 	end))
 
 	track(clearBtn.MouseButton1Click:Connect(function()
 		if stopCurrent() then
-			setStatus("cleared", DEX.Sub)
-			notify("repo hub", "removed the running script")
+			setStatus("dispelled", DEX.Sub)
+			notify("spellbook", "removed the active spell")
 		else
-			setStatus("nothing running", DEX.Sub)
+			setStatus("no active spell", DEX.Sub)
 		end
 	end))
 
@@ -898,6 +853,6 @@ end
 
 local ok, err = pcall(main)
 if not ok then
-	warn("[repo hub] " .. tostring(err))
-	notify("repo hub error", tostring(err))
+	warn("[spellbook] " .. tostring(err))
+	notify("spellbook error", tostring(err))
 end
