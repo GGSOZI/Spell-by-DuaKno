@@ -1,4 +1,5 @@
---// repo hub: fixed widget, slide-open Dex++ styled menu, runs your repo scripts (client side)
+--// repo hub: fixed widget opens a Dex++ styled window with a vertical script list (client side)
+--// title bar: < > dock left/right, - minimize, X close
 --// running a new script stops and removes the previous one's tools, guis, threads and connections
 
 local cloneref = cloneref or function(x) return x end
@@ -25,6 +26,9 @@ local CONFIG = {
 	PositionX = 8,             -- fixed spot of the widget
 	PositionY = 12,
 	ButtonSize = 44,
+	WindowWidth = 300,
+	WindowHeight = 380,
+	DefaultDock = "right",     -- "right" or "left"
 	SlideSpeed = 0.22,
 	SettleTime = 1.5,          -- seconds after a run that new tools/guis count as that script's
 }
@@ -43,6 +47,7 @@ local DEX = {
 	Sub = Color3.fromRGB(170, 170, 170),
 	Good = Color3.fromRGB(173, 241, 149),
 	Important = Color3.fromRGB(255, 0, 0),
+	CloseHover = Color3.fromRGB(196, 43, 28),
 	Icon = Color3.fromRGB(18, 18, 21),
 }
 
@@ -172,7 +177,7 @@ local function main()
 	end
 
 	local size = CONFIG.ButtonSize
-	local itemH = size - 14
+	local TOP = 28 -- title bar height
 
 	local function circle(parent: Instance)
 		local c = Instance.new("UICorner")
@@ -185,6 +190,21 @@ local function main()
 		p.PaddingLeft = UDim.new(0, left)
 		p.PaddingRight = UDim.new(0, right)
 		p.Parent = parent
+	end
+
+	local function viewport(): Vector2
+		local cam = workspace.CurrentCamera
+		return cam and cam.ViewportSize or Vector2.new(800, 400)
+	end
+
+	local function tweenTo(obj: Instance, props, t: number?)
+		local tw = TweenService:Create(
+			obj,
+			TweenInfo.new(t or CONFIG.SlideSpeed, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			props
+		)
+		tw:Play()
+		return tw
 	end
 
 	-- widget, same structure as the one you copied
@@ -236,43 +256,88 @@ local function main()
 	clickRegion.ZIndex = 20
 	clickRegion.Parent = widget
 
-	-- slide-open menu, Dex++ look: Main2 body, Outline1 border, Button items, blue selection
-	local slide = Instance.new("Frame")
-	slide.Name = "Slide"
-	slide.BackgroundColor3 = DEX.Main2
-	slide.BackgroundTransparency = 0.1
-	slide.BorderColor3 = DEX.Outline1
-	slide.BorderSizePixel = 1
-	slide.ClipsDescendants = true
-	slide.Position = UDim2.new(0, size + 6, 0, 0)
-	slide.Size = UDim2.new(0, 0, 1, 0)
-	slide.Visible = false
-	slide.ZIndex = 20
-	slide.Parent = widget
+	-- window, Dex++ look: Main1 title bar, Main2 body, Outline1 border
+	local window = Instance.new("Frame")
+	window.Name = "Window"
+	window.BackgroundColor3 = DEX.Main2
+	window.BackgroundTransparency = 0.1
+	window.BorderColor3 = DEX.Outline1
+	window.BorderSizePixel = 1
+	window.ClipsDescendants = true
+	window.Size = UDim2.fromOffset(CONFIG.WindowWidth, CONFIG.WindowHeight)
+	window.Position = UDim2.fromOffset(0, 0)
+	window.Visible = false
+	window.ZIndex = 10
+	window.Parent = gui
 
-	local menu = Instance.new("ScrollingFrame")
-	menu.Name = "Menu"
-	menu.BackgroundTransparency = 1
-	menu.BorderSizePixel = 0
-	menu.Position = UDim2.fromOffset(4, 0)
-	menu.Size = UDim2.new(1, -8, 1, 0)
-	menu.CanvasSize = UDim2.new()
-	menu.AutomaticCanvasSize = Enum.AutomaticSize.X
-	menu.ScrollingDirection = Enum.ScrollingDirection.X
-	menu.ScrollBarThickness = 2
-	menu.ScrollBarImageColor3 = Color3.fromRGB(57, 57, 57)
-	menu.ElasticBehavior = Enum.ElasticBehavior.Never
-	menu.ZIndex = 20
-	menu.Parent = slide
+	local topBar = Instance.new("Frame")
+	topBar.Name = "TopBar"
+	topBar.BackgroundColor3 = DEX.Main1
+	topBar.BorderSizePixel = 0
+	topBar.Size = UDim2.new(1, 0, 0, TOP)
+	topBar.ZIndex = 11
+	topBar.Parent = window
 
-	local layout = Instance.new("UIListLayout")
-	layout.FillDirection = Enum.FillDirection.Horizontal
-	layout.VerticalAlignment = Enum.VerticalAlignment.Center
-	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Padding = UDim.new(0, 4)
-	layout.Parent = menu
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.BackgroundTransparency = 1
+	title.Position = UDim2.fromOffset(8, 0)
+	title.Size = UDim2.new(1, -8 - 28 * 4, 1, 0)
+	title.Font = Enum.Font.SourceSans
+	title.TextSize = 14
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.TextColor3 = DEX.Text
+	title.Text = CONFIG.Repo
+	title.ZIndex = 12
+	title.Parent = topBar
 
-	--// dex styled items
+	local function titleButton(text: string, indexFromRight: number, hoverColor: Color3?)
+		local b = Instance.new("TextButton")
+		b.AutoButtonColor = false
+		b.BackgroundColor3 = DEX.ButtonHover
+		b.BackgroundTransparency = 1
+		b.BorderSizePixel = 0
+		b.Size = UDim2.new(0, 28, 1, 0)
+		b.Position = UDim2.new(1, -28 * indexFromRight, 0, 0)
+		b.Font = Enum.Font.SourceSansBold
+		b.TextSize = 16
+		b.TextColor3 = DEX.Text
+		b.Text = text
+		b.ZIndex = 12
+		b.Parent = topBar
+
+		track(b.MouseEnter:Connect(function()
+			b.BackgroundColor3 = hoverColor or DEX.ButtonHover
+			b.BackgroundTransparency = 0
+		end))
+		track(b.MouseLeave:Connect(function()
+			b.BackgroundTransparency = 1
+		end))
+		track(b.MouseButton1Down:Connect(function()
+			b.BackgroundColor3 = DEX.ButtonPress
+			b.BackgroundTransparency = 0
+		end))
+		track(b.MouseButton1Up:Connect(function()
+			b.BackgroundColor3 = hoverColor or DEX.ButtonHover
+		end))
+		return b
+	end
+
+	local closeBtn = titleButton("X", 1, DEX.CloseHover)
+	local minBtn = titleButton("-", 2)
+	local dockRightBtn = titleButton(">", 3)
+	local dockLeftBtn = titleButton("<", 4)
+
+	local body = Instance.new("Frame")
+	body.Name = "Body"
+	body.BackgroundTransparency = 1
+	body.Position = UDim2.fromOffset(0, TOP)
+	body.Size = UDim2.new(1, 0, 1, -TOP)
+	body.ZIndex = 11
+	body.Parent = window
+
+	--// dex styled buttons
 
 	local activeBtn = nil
 
@@ -280,11 +345,10 @@ local function main()
 		return btn == activeBtn and DEX.Selection or DEX.Button
 	end
 
-	local function makeButton(text: string, order: number)
+	local function makeButton(parent: Instance, text: string, order: number, height: number, left: boolean?)
 		local btn = Instance.new("TextButton")
 		btn.AutoButtonColor = false
-		btn.AutomaticSize = Enum.AutomaticSize.X
-		btn.Size = UDim2.new(0, 0, 0, itemH)
+		btn.Size = UDim2.new(1, -6, 0, height)
 		btn.BackgroundColor3 = DEX.Button
 		btn.BorderColor3 = DEX.Outline2
 		btn.BorderSizePixel = 1
@@ -292,11 +356,15 @@ local function main()
 		btn.TextSize = 14
 		btn.TextColor3 = DEX.Text
 		btn.TextTransparency = 0.1
+		btn.TextTruncate = Enum.TextTruncate.AtEnd
 		btn.Text = text
 		btn.LayoutOrder = order
-		btn.ZIndex = 21
-		btn.Parent = menu
-		pad(btn, 10, 10)
+		btn.ZIndex = 12
+		btn.Parent = parent
+		if left then
+			btn.TextXAlignment = Enum.TextXAlignment.Left
+			pad(btn, 10, 10)
+		end
 
 		track(btn.MouseEnter:Connect(function()
 			btn.BackgroundColor3 = btn == activeBtn and DEX.Selection or DEX.ButtonHover
@@ -324,75 +392,161 @@ local function main()
 		end
 	end
 
-	local refreshBtn = makeButton("refresh", 1)
-	local clearBtn = makeButton("clear", 2)
+	-- controls row
+	local controls = Instance.new("Frame")
+	controls.Name = "Controls"
+	controls.BackgroundTransparency = 1
+	controls.Position = UDim2.fromOffset(4, 4)
+	controls.Size = UDim2.new(1, -8, 0, 28)
+	controls.ZIndex = 11
+	controls.Parent = body
 
-	local divider = Instance.new("Frame")
-	divider.Name = "Divider"
-	divider.BackgroundColor3 = DEX.Outline2
-	divider.BorderSizePixel = 0
-	divider.Size = UDim2.fromOffset(1, itemH - 8)
-	divider.LayoutOrder = 3
-	divider.ZIndex = 21
-	divider.Parent = menu
+	local controlsLayout = Instance.new("UIListLayout")
+	controlsLayout.FillDirection = Enum.FillDirection.Horizontal
+	controlsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	controlsLayout.Padding = UDim.new(0, 4)
+	controlsLayout.Parent = controls
+
+	local refreshBtn = makeButton(controls, "refresh", 1, 28)
+	local clearBtn = makeButton(controls, "clear", 2, 28)
+	local unloadBtn = makeButton(controls, "unload", 3, 28)
+	for _, b in ipairs({ refreshBtn, clearBtn, unloadBtn }) do
+		b.Size = UDim2.new(1 / 3, -3, 1, 0)
+	end
 
 	local statusLabel = Instance.new("TextLabel")
 	statusLabel.Name = "Status"
 	statusLabel.BackgroundTransparency = 1
-	statusLabel.AutomaticSize = Enum.AutomaticSize.X
-	statusLabel.Size = UDim2.new(0, 0, 0, itemH)
+	statusLabel.Position = UDim2.fromOffset(8, 36)
+	statusLabel.Size = UDim2.new(1, -16, 0, 18)
 	statusLabel.Font = Enum.Font.SourceSans
 	statusLabel.TextSize = 14
+	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+	statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
 	statusLabel.TextColor3 = DEX.Sub
 	statusLabel.Text = "ready"
-	statusLabel.LayoutOrder = 4
-	statusLabel.ZIndex = 21
-	statusLabel.Parent = menu
-	pad(statusLabel, 6, 10)
+	statusLabel.ZIndex = 11
+	statusLabel.Parent = body
 
 	local function setStatus(text: string, color: Color3?)
 		statusLabel.Text = text
 		statusLabel.TextColor3 = color or DEX.Sub
 	end
 
-	--// slide open / close
+	-- vertical script list
+	local list = Instance.new("ScrollingFrame")
+	list.Name = "List"
+	list.BackgroundColor3 = DEX.Main2
+	list.BackgroundTransparency = 0
+	list.BorderColor3 = DEX.Outline1
+	list.BorderSizePixel = 1
+	list.Position = UDim2.fromOffset(4, 58)
+	list.Size = UDim2.new(1, -8, 1, -62)
+	list.CanvasSize = UDim2.new()
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.ScrollingDirection = Enum.ScrollingDirection.Y
+	list.ScrollBarThickness = 3
+	list.ScrollBarImageColor3 = Color3.fromRGB(57, 57, 57)
+	list.ElasticBehavior = Enum.ElasticBehavior.Never
+	list.ZIndex = 11
+	list.Parent = body
+
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.FillDirection = Enum.FillDirection.Vertical
+	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	listLayout.Padding = UDim.new(0, 3)
+	listLayout.Parent = list
+
+	local listPadding = Instance.new("UIPadding")
+	listPadding.PaddingTop = UDim.new(0, 3)
+	listPadding.PaddingLeft = UDim.new(0, 3)
+	listPadding.PaddingBottom = UDim.new(0, 3)
+	listPadding.Parent = list
+
+	--// window state: open / close, dock, minimize
 
 	local isOpen = false
+	local minimized = false
+	local dock = (CONFIG.DefaultDock == "left") and "left" or "right"
 
-	local function targetWidth(): number
-		local cam = workspace.CurrentCamera
-		local vp = cam and cam.ViewportSize or Vector2.new(800, 400)
-		local room = vp.X - widget.AbsolutePosition.X - size - 6 - 8
-		local want = layout.AbsoluteContentSize.X + 14
-		return math.max(0, math.min(want, room))
+	local function windowRect()
+		local vp = viewport()
+		local w = math.min(CONFIG.WindowWidth, vp.X - 16)
+		local y = CONFIG.PositionY + size + 8
+		local h = math.max(140, math.min(CONFIG.WindowHeight, vp.Y - y - 8))
+		local x = (dock == "right") and (vp.X - w - 8) or CONFIG.PositionX
+		return x, y, w, h
+	end
+
+	local function goalProps()
+		local x, y, w, h = windowRect()
+		return UDim2.fromOffset(x, y), UDim2.fromOffset(w, minimized and TOP or h)
+	end
+
+	local function paintDock()
+		dockRightBtn.TextColor3 = (dock == "right") and DEX.Sub or DEX.Text
+		dockLeftBtn.TextColor3 = (dock == "left") and DEX.Sub or DEX.Text
+	end
+	paintDock()
+
+	local function offscreenX(): number
+		local _, _, w = windowRect()
+		return (dock == "right") and viewport().X or -w - 8
 	end
 
 	local function setOpen(open: boolean)
 		isOpen = open
 		overlay.Visible = open
 		if open then
-			slide.Visible = true
-		end
-		local tween = TweenService:Create(
-			slide,
-			TweenInfo.new(CONFIG.SlideSpeed, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-			{ Size = UDim2.new(0, open and targetWidth() or 0, 1, 0) }
-		)
-		tween:Play()
-		if not open then
+			local pos, sz = goalProps()
+			if not window.Visible then
+				window.Size = sz
+				window.Position = UDim2.fromOffset(offscreenX(), pos.Y.Offset)
+				window.Visible = true
+			end
+			tweenTo(window, { Position = pos, Size = sz })
+		else
+			local _, y = windowRect()
+			tweenTo(window, { Position = UDim2.fromOffset(offscreenX(), y) })
 			task.delay(CONFIG.SlideSpeed + 0.03, function()
-				if not isOpen and slide then
-					slide.Visible = false
+				if not isOpen and window then
+					window.Visible = false
 				end
 			end)
 		end
 	end
 
-	track(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	local function setDock(side: string)
+		if dock == side then return end
+		dock = side
+		paintDock()
 		if isOpen then
-			slide.Size = UDim2.new(0, targetWidth(), 1, 0)
+			local pos, sz = goalProps()
+			tweenTo(window, { Position = pos, Size = sz })
 		end
-	end))
+	end
+
+	local function setMinimized(state: boolean)
+		minimized = state
+		minBtn.Text = state and "+" or "-"
+		if isOpen then
+			local pos, sz = goalProps()
+			tweenTo(window, { Position = pos, Size = sz })
+		end
+	end
+
+	pcall(function()
+		local cam = workspace.CurrentCamera
+		if cam then
+			track(cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+				if isOpen then
+					local pos, sz = goalProps()
+					window.Position = pos
+					window.Size = sz
+				end
+			end))
+		end
+	end)
 
 	--// remove the previous script: tools, guis, threads, connections
 
@@ -439,10 +593,10 @@ local function main()
 	end
 
 	local function signalList()
-		local list = {}
+		local sigs = {}
 		local function add(sig)
 			if sig then
-				table.insert(list, sig)
+				table.insert(sigs, sig)
 			end
 		end
 		pcall(function()
@@ -479,7 +633,7 @@ local function main()
 				add(ch.DescendantAdded)
 			end
 		end)
-		return list
+		return sigs
 	end
 
 	local function killConnections(src: string?)
@@ -637,7 +791,7 @@ local function main()
 	local scanning = false
 
 	local function clearEntries()
-		for _, child in ipairs(menu:GetChildren()) do
+		for _, child in ipairs(list:GetChildren()) do
 			if child:IsA("TextButton") and child:GetAttribute("Entry") then
 				if child == activeBtn then
 					activeBtn = nil
@@ -668,7 +822,7 @@ local function main()
 
 		for i, entry in ipairs(entries) do
 			local label = string.gsub(entry.path, "%.%w+$", "")
-			local btn = makeButton(label, 100 + i)
+			local btn = makeButton(list, label, i, 30, true)
 			btn:SetAttribute("Entry", true)
 
 			if currentRun and currentRun.path == entry.path then
@@ -676,7 +830,6 @@ local function main()
 			end
 
 			track(btn.MouseButton1Click:Connect(function()
-				setOpen(false)
 				runEntry(entry, btn)
 			end))
 		end
@@ -707,6 +860,22 @@ local function main()
 		end
 	end))
 
+	track(closeBtn.MouseButton1Click:Connect(function()
+		setOpen(false)
+	end))
+
+	track(minBtn.MouseButton1Click:Connect(function()
+		setMinimized(not minimized)
+	end))
+
+	track(dockRightBtn.MouseButton1Click:Connect(function()
+		setDock("right")
+	end))
+
+	track(dockLeftBtn.MouseButton1Click:Connect(function()
+		setDock("left")
+	end))
+
 	track(refreshBtn.MouseButton1Click:Connect(function()
 		task.spawn(populate)
 	end))
@@ -718,6 +887,10 @@ local function main()
 		else
 			setStatus("nothing running", DEX.Sub)
 		end
+	end))
+
+	track(unloadBtn.MouseButton1Click:Connect(function()
+		cleanup()
 	end))
 
 	task.spawn(populate)
