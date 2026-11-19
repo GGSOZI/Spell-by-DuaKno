@@ -1,4 +1,4 @@
---// repo hub: scans your github repo, lists every other script, click to run (client side)
+--// repo hub: adds a menu button to the roblox top bar, click it to list and run your repo scripts (client side)
 
 local CONFIG = {
 	Owner = "GGSOZI",
@@ -10,13 +10,17 @@ local CONFIG = {
 	Token = nil,               -- optional github token string, avoids rate limit
 	Extensions = { lua = true, luau = true, txt = true },
 	AllowNoExtension = true,   -- files with no extension, like "1 Snowgrave and Iceshock by DuaKNo"
+	ButtonGap = 12,            -- space between the last top bar button and ours
+	PanelWidth = 300,
+	PanelMaxHeight = 360,
 }
 
 local Players = cloneref(game:GetService("Players"))
 local HttpService = cloneref(game:GetService("HttpService"))
-local UserInputService = cloneref(game:GetService("UserInputService"))
 local CoreGui = cloneref(game:GetService("CoreGui"))
+local StarterGui = cloneref(game:GetService("StarterGui"))
 
+local alive = true
 local connections = {}
 local function track(conn)
 	table.insert(connections, conn)
@@ -25,6 +29,7 @@ end
 
 local gui
 local function cleanup()
+	alive = false
 	for _, conn in ipairs(connections) do
 		pcall(function() conn:Disconnect() end)
 	end
@@ -42,10 +47,15 @@ if getgenv then
 	getgenv().RepoHubCleanup = cleanup
 end
 
+local function notify(title: string, text: string)
+	pcall(function()
+		StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = 4 })
+	end)
+end
+
 --// http
 
 local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request
-
 local lastStatus = nil
 
 local function httpGet(url: string, withAuth: boolean?): string?
@@ -124,6 +134,7 @@ local COLORS = {
 	sub = Color3.fromRGB(150, 150, 162),
 	ok = Color3.fromRGB(90, 200, 120),
 	bad = Color3.fromRGB(220, 90, 90),
+	topbar = Color3.fromRGB(24, 25, 29),
 }
 
 local function corner(parent: Instance, r: number)
@@ -149,82 +160,111 @@ end
 gui = Instance.new("ScreenGui")
 gui.Name = "RepoHub"
 gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 100
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 mountGui(gui)
 
-local main = Instance.new("Frame")
-main.Name = "Main"
-main.Size = UDim2.fromOffset(320, 400)
-main.Position = UDim2.new(0.5, -160, 0.5, -200)
-main.BackgroundColor3 = COLORS.bg
-main.BorderSizePixel = 0
-main.Parent = gui
-corner(main, 10)
+-- invisible layer behind the panel, click it to close
+local backdrop = Instance.new("TextButton")
+backdrop.Name = "Backdrop"
+backdrop.Size = UDim2.fromScale(1, 1)
+backdrop.BackgroundTransparency = 1
+backdrop.Text = ""
+backdrop.AutoButtonColor = false
+backdrop.Visible = false
+backdrop.ZIndex = 1
+backdrop.Parent = gui
 
-local bar = Instance.new("Frame")
-bar.Size = UDim2.new(1, 0, 0, 38)
-bar.BackgroundColor3 = COLORS.bar
-bar.BorderSizePixel = 0
-bar.Parent = main
-corner(bar, 10)
+-- top bar button (three horizontal bars)
+local menuBtn = Instance.new("TextButton")
+menuBtn.Name = "RepoHubButton"
+menuBtn.Text = ""
+menuBtn.AutoButtonColor = false
+menuBtn.Size = UDim2.fromOffset(44, 44)
+menuBtn.Position = UDim2.fromOffset(250, 18)
+menuBtn.BackgroundColor3 = COLORS.topbar
+menuBtn.BackgroundTransparency = 0.15
+menuBtn.BorderSizePixel = 0
+menuBtn.ZIndex = 3
+menuBtn.Parent = gui
 
-local barFix = Instance.new("Frame")
-barFix.Size = UDim2.new(1, 0, 0, 10)
-barFix.Position = UDim2.new(0, 0, 1, -10)
-barFix.BackgroundColor3 = COLORS.bar
-barFix.BorderSizePixel = 0
-barFix.Parent = bar
+do
+	local round = Instance.new("UICorner")
+	round.CornerRadius = UDim.new(1, 0)
+	round.Parent = menuBtn
 
-local title = Instance.new("TextLabel")
-title.BackgroundTransparency = 1
-title.Position = UDim2.fromOffset(12, 0)
-title.Size = UDim2.new(1, -90, 1, 0)
-title.Font = Enum.Font.GothamMedium
-title.TextSize = 14
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.TextColor3 = COLORS.text
-title.Text = CONFIG.Repo
-title.Parent = bar
-
-local function barButton(text: string, xOffset: number)
-	local b = Instance.new("TextButton")
-	b.Size = UDim2.fromOffset(28, 24)
-	b.Position = UDim2.new(1, xOffset, 0, 7)
-	b.BackgroundColor3 = COLORS.item
-	b.BorderSizePixel = 0
-	b.Font = Enum.Font.GothamBold
-	b.TextSize = 13
-	b.TextColor3 = COLORS.text
-	b.Text = text
-	b.AutoButtonColor = true
-	b.Parent = bar
-	corner(b, 6)
-	return b
+	for _, off in ipairs({ -6, 0, 6 }) do
+		local line = Instance.new("Frame")
+		line.AnchorPoint = Vector2.new(0.5, 0.5)
+		line.Position = UDim2.new(0.5, 0, 0.5, off)
+		line.Size = UDim2.new(0.4, 0, 0, 2)
+		line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		line.BorderSizePixel = 0
+		line.ZIndex = 4
+		line.Parent = menuBtn
+		corner(line, 1)
+	end
 end
 
-local refreshBtn = barButton("R", -70)
-local closeBtn = barButton("X", -36)
+-- dropdown panel
+local panel = Instance.new("Frame")
+panel.Name = "Panel"
+panel.Size = UDim2.fromOffset(CONFIG.PanelWidth, CONFIG.PanelMaxHeight)
+panel.BackgroundColor3 = COLORS.bg
+panel.BorderSizePixel = 0
+panel.Visible = false
+panel.ZIndex = 5
+panel.Parent = gui
+corner(panel, 10)
+
+local header = Instance.new("TextLabel")
+header.BackgroundTransparency = 1
+header.Position = UDim2.fromOffset(14, 0)
+header.Size = UDim2.new(1, -70, 0, 38)
+header.Font = Enum.Font.GothamMedium
+header.TextSize = 14
+header.TextXAlignment = Enum.TextXAlignment.Left
+header.TextColor3 = COLORS.text
+header.Text = CONFIG.Repo
+header.ZIndex = 6
+header.Parent = panel
+
+local refreshBtn = Instance.new("TextButton")
+refreshBtn.Size = UDim2.fromOffset(52, 24)
+refreshBtn.Position = UDim2.new(1, -62, 0, 7)
+refreshBtn.BackgroundColor3 = COLORS.item
+refreshBtn.BorderSizePixel = 0
+refreshBtn.Font = Enum.Font.GothamMedium
+refreshBtn.TextSize = 12
+refreshBtn.TextColor3 = COLORS.text
+refreshBtn.Text = "refresh"
+refreshBtn.ZIndex = 6
+refreshBtn.Parent = panel
+corner(refreshBtn, 6)
 
 local status = Instance.new("TextLabel")
 status.BackgroundTransparency = 1
-status.Position = UDim2.new(0, 12, 1, -26)
-status.Size = UDim2.new(1, -24, 0, 20)
+status.Position = UDim2.new(0, 14, 1, -26)
+status.Size = UDim2.new(1, -28, 0, 20)
 status.Font = Enum.Font.Gotham
 status.TextSize = 12
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.TextColor3 = COLORS.sub
 status.Text = "ready"
-status.Parent = main
+status.ZIndex = 6
+status.Parent = panel
 
 local list = Instance.new("ScrollingFrame")
-list.Position = UDim2.fromOffset(10, 48)
-list.Size = UDim2.new(1, -20, 1, -80)
+list.Position = UDim2.fromOffset(8, 42)
+list.Size = UDim2.new(1, -16, 1, -74)
 list.BackgroundTransparency = 1
 list.BorderSizePixel = 0
 list.ScrollBarThickness = 3
 list.CanvasSize = UDim2.new()
 list.AutomaticCanvasSize = Enum.AutomaticSize.Y
-list.Parent = main
+list.ZIndex = 6
+list.Parent = panel
 
 local layout = Instance.new("UIListLayout")
 layout.Padding = UDim.new(0, 6)
@@ -236,47 +276,87 @@ local function setStatus(text: string, color: Color3?)
 	status.TextColor3 = color or COLORS.sub
 end
 
---// drag
+--// top bar placement: sit to the right of the last button already there
 
-do
-	local dragging = false
-	local dragStart: Vector3
-	local startPos: UDim2
-
-	track(bar.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1
-			or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = input.Position
-			startPos = main.Position
+local function findTopbarRightEdge()
+	local rightEdge, centerY, height
+	local roots = {}
+	table.insert(roots, CoreGui)
+	if gethui then
+		local ok, h = pcall(gethui)
+		if ok and h and h ~= CoreGui then
+			table.insert(roots, h)
 		end
-	end))
+	end
+	local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
+	if pg then
+		table.insert(roots, pg)
+	end
 
-	track(UserInputService.InputChanged:Connect(function(input)
-		if not dragging then return end
-		if input.UserInputType == Enum.UserInputType.MouseMovement
-			or input.UserInputType == Enum.UserInputType.Touch then
-			local delta = input.Position - dragStart
-			main.Position = UDim2.new(
-				startPos.X.Scale, startPos.X.Offset + delta.X,
-				startPos.Y.Scale, startPos.Y.Offset + delta.Y
-			)
+	for _, root in ipairs(roots) do
+		local ok, desc = pcall(function()
+			return root:GetDescendants()
+		end)
+		if ok then
+			for _, obj in ipairs(desc) do
+				if obj:IsA("GuiObject") and obj.Visible and not obj:IsDescendantOf(gui) then
+					local size = obj.AbsoluteSize
+					local pos = obj.AbsolutePosition
+					local cy = pos.Y + size.Y / 2
+					local looksReal = obj.BackgroundTransparency < 1 or obj:IsA("GuiButton")
+					if looksReal
+						and size.X >= 30 and size.X <= 340
+						and size.Y >= 30 and size.Y <= 70
+						and cy >= 20 and cy <= 75 then
+						local edge = pos.X + size.X
+						if not rightEdge or edge > rightEdge then
+							rightEdge = edge
+							centerY = cy
+							height = size.Y
+						end
+					end
+				end
+			end
 		end
-	end))
+	end
+	return rightEdge, centerY, height
+end
 
-	track(UserInputService.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1
-			or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = false
-		end
-	end))
+local function placePanel()
+	local cam = workspace.CurrentCamera
+	local vp = cam and cam.ViewportSize or Vector2.new(800, 600)
+	local bp = menuBtn.AbsolutePosition
+	local bs = menuBtn.AbsoluteSize
+	local pw = CONFIG.PanelWidth
+	local y = bp.Y + bs.Y + 8
+	local ph = math.max(140, math.min(CONFIG.PanelMaxHeight, vp.Y - y - 8))
+	local x = math.clamp(bp.X, 8, math.max(8, vp.X - pw - 8))
+	panel.Size = UDim2.fromOffset(pw, ph)
+	panel.Position = UDim2.fromOffset(x, y)
+end
+
+local function reposition()
+	local edge, cy, h = findTopbarRightEdge()
+	local size = 44
+	if h then
+		size = math.clamp(math.floor(h), 36, 64)
+	end
+	menuBtn.Size = UDim2.fromOffset(size, size)
+	if edge then
+		menuBtn.Position = UDim2.fromOffset(edge + CONFIG.ButtonGap, cy - size / 2)
+	else
+		menuBtn.Position = UDim2.fromOffset(250, 18)
+	end
+	if panel.Visible then
+		placePanel()
+	end
 end
 
 --// run a file from the repo
 
 local running = false
 
-local function runEntry(entry, button: TextButton)
+local function runEntry(entry)
 	if running then return end
 	running = true
 	setStatus("fetching " .. entry.name .. "...")
@@ -284,6 +364,7 @@ local function runEntry(entry, button: TextButton)
 	local src = httpGet(entry.url, false)
 	if not src then
 		setStatus("failed to fetch " .. entry.name, COLORS.bad)
+		notify("repo hub", "failed to fetch " .. entry.name)
 		running = false
 		return
 	end
@@ -291,6 +372,7 @@ local function runEntry(entry, button: TextButton)
 	local fn, compileErr = loadstring(src)
 	if not fn then
 		setStatus("compile error in " .. entry.name, COLORS.bad)
+		notify("repo hub", "compile error in " .. entry.name)
 		warn("[repo hub] " .. tostring(compileErr))
 		running = false
 		return
@@ -300,9 +382,10 @@ local function runEntry(entry, button: TextButton)
 		local ok, runErr = pcall(fn)
 		if ok then
 			setStatus("executed " .. entry.name, COLORS.ok)
-			button.TextColor3 = COLORS.ok
+			notify("repo hub", "executed " .. entry.name)
 		else
 			setStatus("runtime error in " .. entry.name, COLORS.bad)
+			notify("repo hub", "runtime error in " .. entry.name)
 			warn("[repo hub] " .. tostring(runErr))
 		end
 		running = false
@@ -310,6 +393,17 @@ local function runEntry(entry, button: TextButton)
 end
 
 --// build list
+
+local loaded = false
+local scanning = false
+
+local function setPanelOpen(open: boolean)
+	panel.Visible = open
+	backdrop.Visible = open
+	if open then
+		placePanel()
+	end
+end
 
 local function clearList()
 	for _, child in ipairs(list:GetChildren()) do
@@ -320,6 +414,8 @@ local function clearList()
 end
 
 local function populate()
+	if scanning then return end
+	scanning = true
 	clearList()
 	setStatus("scanning repo...")
 	local entries = {}
@@ -327,6 +423,8 @@ local function populate()
 
 	if err and #entries == 0 then
 		setStatus("scan failed: " .. err, COLORS.bad)
+		loaded = false
+		scanning = false
 		return
 	end
 
@@ -348,6 +446,7 @@ local function populate()
 		btn.TextColor3 = COLORS.text
 		btn.TextTruncate = Enum.TextTruncate.AtEnd
 		btn.Text = "   " .. (string.gsub(entry.path, "%.%w+$", ""))
+		btn.ZIndex = 7
 		btn.Parent = list
 		corner(btn, 8)
 
@@ -358,21 +457,43 @@ local function populate()
 			btn.BackgroundColor3 = COLORS.item
 		end))
 		track(btn.MouseButton1Click:Connect(function()
-			runEntry(entry, btn)
+			setPanelOpen(false)
+			runEntry(entry)
 		end))
 	end
 
+	loaded = #entries > 0
 	if #entries == 0 then
 		setStatus("no scripts found in repo", COLORS.bad)
 	else
 		setStatus(#entries .. " script(s) found", COLORS.ok)
 	end
+	scanning = false
 end
+
+--// wiring
+
+track(menuBtn.MouseButton1Click:Connect(function()
+	local willOpen = not panel.Visible
+	setPanelOpen(willOpen)
+	if willOpen and not loaded then
+		task.spawn(populate)
+	end
+end))
+
+track(backdrop.MouseButton1Click:Connect(function()
+	setPanelOpen(false)
+end))
 
 track(refreshBtn.MouseButton1Click:Connect(function()
 	task.spawn(populate)
 end))
 
-track(closeBtn.MouseButton1Click:Connect(cleanup))
+task.spawn(function()
+	while alive and gui do
+		pcall(reposition)
+		task.wait(2)
+	end
+end)
 
 task.spawn(populate)
