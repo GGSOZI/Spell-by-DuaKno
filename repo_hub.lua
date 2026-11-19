@@ -1,6 +1,5 @@
---// spellbook hub: a < tab in the top right corner opens an arcane Dex++ styled window (client side)
---// lists every script in your repo as a spell, tap one to cast it
---// casting a new spell removes the previous one's tools, guis, threads and connections
+--// spells hub: a < tab in the top right corner opens a window listing every script in your repo (client side)
+--// tap a row to run it. running a new one removes the previous one's tools, guis, threads and connections
 
 local cloneref = cloneref or function(x) return x end
 
@@ -24,29 +23,27 @@ local CONFIG = {
 	AllowNoExtension = true,   -- files with no extension, like "1 Snowgrave and Iceshock by DuaKNo"
 
 	TabY = 12,                 -- height of the < tab from the top of the screen
-	TabHeight = 46,
-	WindowWidth = 300,
-	WindowHeight = 380,
-	SlideSpeed = 0.22,
-	SettleTime = 1.5,          -- seconds after a cast that new tools/guis count as that spell's
+	TabHeight = 52,
+	WindowWidth = 292,
+	WindowHeight = 372,
+	SlideSpeed = 0.28,
+	SettleTime = 1.5,          -- seconds after a run that new tools/guis count as that script's
 }
 
--- arcane palette on the Dex++ layout
-local DEX = {
-	Main1 = Color3.fromRGB(40, 26, 82),
-	Main2 = Color3.fromRGB(24, 17, 44),
-	Outline1 = Color3.fromRGB(70, 50, 130),
-	Outline2 = Color3.fromRGB(90, 64, 170),
-	Button = Color3.fromRGB(48, 36, 84),
-	ButtonHover = Color3.fromRGB(68, 52, 118),
-	ButtonPress = Color3.fromRGB(34, 26, 60),
-	Selection = Color3.fromRGB(122, 64, 255),
-	Glow = Color3.fromRGB(150, 100, 255),
-	Text = Color3.fromRGB(240, 235, 255),
-	Sub = Color3.fromRGB(170, 160, 205),
-	Good = Color3.fromRGB(160, 255, 210),
-	Important = Color3.fromRGB(255, 90, 120),
-	CloseHover = Color3.fromRGB(196, 43, 70),
+local COLOR = {
+	window = Color3.fromRGB(12, 13, 17),
+	header = Color3.fromRGB(17, 19, 25),
+	line = Color3.fromRGB(30, 34, 44),
+	edge = Color3.fromRGB(40, 46, 60),
+	row = Color3.fromRGB(12, 13, 17),
+	rowHover = Color3.fromRGB(22, 25, 33),
+	rowActive = Color3.fromRGB(18, 30, 42),
+	accent = Color3.fromRGB(110, 200, 255),
+	text = Color3.fromRGB(214, 222, 235),
+	dim = Color3.fromRGB(122, 132, 148),
+	good = Color3.fromRGB(120, 230, 170),
+	bad = Color3.fromRGB(255, 96, 110),
+	badSoft = Color3.fromRGB(58, 24, 30),
 }
 
 local alive = true
@@ -174,46 +171,48 @@ local function main()
 		gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
 	end
 
-	local TOP = 30 -- title bar height
-
-	local function pad(parent: Instance, left: number, right: number)
-		local p = Instance.new("UIPadding")
-		p.PaddingLeft = UDim.new(0, left)
-		p.PaddingRight = UDim.new(0, right)
-		p.Parent = parent
-	end
-
-	local function stroke(parent: Instance, color: Color3, thickness: number, transparency: number)
-		local s = Instance.new("UIStroke")
-		s.Color = color
-		s.Thickness = thickness
-		s.Transparency = transparency
-		s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-		s.Parent = parent
-		return s
-	end
-
-	local function gradient(parent: Instance, a: Color3, b: Color3, rotation: number)
-		local g = Instance.new("UIGradient")
-		g.Color = ColorSequence.new(a, b)
-		g.Rotation = rotation
-		g.Parent = parent
-		return g
-	end
+	local HEADER = 36
+	local TOOLBAR = 28
+	local FOOTER = 24
 
 	local function viewport(): Vector2
 		local cam = workspace.CurrentCamera
 		return cam and cam.ViewportSize or Vector2.new(800, 400)
 	end
 
-	local function tweenTo(obj: Instance, props, t: number?)
+	local function tweenTo(obj: Instance, props, t: number?, style: Enum.EasingStyle?)
 		local tw = TweenService:Create(
 			obj,
-			TweenInfo.new(t or CONFIG.SlideSpeed, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			TweenInfo.new(t or CONFIG.SlideSpeed, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
 			props
 		)
 		tw:Play()
 		return tw
+	end
+
+	local function round(parent: Instance, r: number)
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0, r)
+		c.Parent = parent
+	end
+
+	local function edge(parent: Instance)
+		local s = Instance.new("UIStroke")
+		s.Color = COLOR.edge
+		s.Thickness = 1
+		s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		s.Parent = parent
+		return s
+	end
+
+	local function solid(parent: Instance, color: Color3, size: UDim2, pos: UDim2)
+		local f = Instance.new("Frame")
+		f.BackgroundColor3 = color
+		f.BorderSizePixel = 0
+		f.Size = size
+		f.Position = pos
+		f.Parent = parent
+		return f
 	end
 
 	-- the < tab in the top right corner
@@ -222,31 +221,35 @@ local function main()
 	tab.AutoButtonColor = false
 	tab.AnchorPoint = Vector2.new(1, 0)
 	tab.Position = UDim2.new(1, 0, 0, CONFIG.TabY)
-	tab.Size = UDim2.fromOffset(30, CONFIG.TabHeight)
-	tab.BackgroundColor3 = DEX.Main1
-	tab.BackgroundTransparency = 0.05
+	tab.Size = UDim2.fromOffset(24, CONFIG.TabHeight)
+	tab.BackgroundColor3 = COLOR.header
 	tab.BorderSizePixel = 0
-	tab.Font = Enum.Font.SourceSansBold
-	tab.TextSize = 24
-	tab.TextColor3 = DEX.Text
+	tab.Font = Enum.Font.Code
+	tab.TextSize = 18
+	tab.TextColor3 = COLOR.dim
 	tab.Text = "<"
 	tab.ZIndex = 30
 	tab.Parent = gui
+	round(tab, 6)
+	edge(tab)
 
-	do
-		local c = Instance.new("UICorner")
-		c.CornerRadius = UDim.new(0, 8)
-		c.Parent = tab
-	end
-	gradient(tab, Color3.fromRGB(96, 56, 190), Color3.fromRGB(40, 26, 82), 90)
-	local tabStroke = stroke(tab, DEX.Glow, 1.5, 0.3)
+	local tabMark = solid(tab, COLOR.accent, UDim2.fromOffset(2, 22), UDim2.new(0, 0, 0.5, -11))
+	tabMark.ZIndex = 31
 
-	-- window: Dex++ layout, Main1 title bar, Main2 body, outlined
+	track(tab.MouseEnter:Connect(function()
+		tab.TextColor3 = COLOR.accent
+		tab.BackgroundColor3 = COLOR.rowHover
+	end))
+	track(tab.MouseLeave:Connect(function()
+		tab.TextColor3 = COLOR.dim
+		tab.BackgroundColor3 = COLOR.header
+	end))
+
+	-- window
 	local window = Instance.new("Frame")
 	window.Name = "Window"
 	window.AnchorPoint = Vector2.new(1, 0)
-	window.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-	window.BackgroundTransparency = 0.04
+	window.BackgroundColor3 = COLOR.window
 	window.BorderSizePixel = 0
 	window.ClipsDescendants = true
 	window.Size = UDim2.fromOffset(CONFIG.WindowWidth, CONFIG.WindowHeight)
@@ -254,206 +257,284 @@ local function main()
 	window.Visible = false
 	window.ZIndex = 10
 	window.Parent = gui
-	gradient(window, Color3.fromRGB(32, 22, 58), Color3.fromRGB(16, 12, 30), 90)
-	stroke(window, DEX.Glow, 1.5, 0.35)
+	round(window, 6)
+	edge(window)
 
-	local topBar = Instance.new("Frame")
-	topBar.Name = "TopBar"
-	topBar.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-	topBar.BorderSizePixel = 0
-	topBar.Size = UDim2.new(1, 0, 0, TOP)
-	topBar.ZIndex = 11
-	topBar.Parent = window
-	gradient(topBar, Color3.fromRGB(96, 56, 190), Color3.fromRGB(40, 26, 82), 0)
+	local header = solid(window, COLOR.header, UDim2.new(1, 0, 0, HEADER), UDim2.new())
+	header.Name = "Header"
+	header.ZIndex = 11
+
+	local accentLine = solid(header, COLOR.accent, UDim2.new(1, 0, 0, 2), UDim2.new())
+	accentLine.ZIndex = 12
 
 	local title = Instance.new("TextLabel")
 	title.Name = "Title"
 	title.BackgroundTransparency = 1
-	title.Position = UDim2.fromOffset(10, 0)
-	title.Size = UDim2.new(1, -10 - 28 * 2, 1, 0)
-	title.Font = Enum.Font.Fantasy
-	title.TextSize = 18
+	title.Position = UDim2.fromOffset(14, 2)
+	title.Size = UDim2.new(1, -90, 1, -2)
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 14
+	title.RichText = true
 	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextTruncate = Enum.TextTruncate.AtEnd
-	title.TextColor3 = DEX.Text
-	title.Text = "🔮 Spellbook"
+	title.TextColor3 = COLOR.text
+	title.Text = 'SPELLS <font color="#6EC8FF">/</font> <font size="11" color="#7A8494">DUAKNO</font>'
 	title.ZIndex = 12
-	title.Parent = topBar
+	title.Parent = header
 
-	local function titleButton(text: string, indexFromRight: number, hoverColor: Color3?)
+	-- header buttons with drawn icons, no glyphs
+	local function headerButton(kind: string, indexFromRight: number)
 		local b = Instance.new("TextButton")
 		b.AutoButtonColor = false
-		b.BackgroundColor3 = DEX.ButtonHover
+		b.BackgroundColor3 = COLOR.rowHover
 		b.BackgroundTransparency = 1
 		b.BorderSizePixel = 0
-		b.Size = UDim2.new(0, 28, 1, 0)
-		b.Position = UDim2.new(1, -28 * indexFromRight, 0, 0)
-		b.Font = Enum.Font.SourceSansBold
-		b.TextSize = 18
-		b.TextColor3 = DEX.Text
-		b.Text = text
+		b.Text = ""
+		b.Size = UDim2.new(0, 32, 1, -2)
+		b.Position = UDim2.new(1, -32 * indexFromRight, 0, 2)
 		b.ZIndex = 12
-		b.Parent = topBar
+		b.Parent = header
+
+		local marks = {}
+		if kind == "min" then
+			local m = solid(b, COLOR.dim, UDim2.fromOffset(10, 2), UDim2.new(0.5, -5, 0.5, -1))
+			m.ZIndex = 13
+			table.insert(marks, m)
+		else
+			for _, rot in ipairs({ 45, -45 }) do
+				local m = solid(b, COLOR.dim, UDim2.fromOffset(14, 2), UDim2.new(0.5, -7, 0.5, -1))
+				m.Rotation = rot
+				m.ZIndex = 13
+				table.insert(marks, m)
+			end
+		end
+
+		local hoverBg = (kind == "close") and COLOR.badSoft or COLOR.rowHover
+		local hoverFg = (kind == "close") and COLOR.bad or COLOR.accent
 
 		track(b.MouseEnter:Connect(function()
-			b.BackgroundColor3 = hoverColor or DEX.ButtonHover
+			b.BackgroundColor3 = hoverBg
 			b.BackgroundTransparency = 0
+			for _, m in ipairs(marks) do
+				m.BackgroundColor3 = hoverFg
+			end
 		end))
 		track(b.MouseLeave:Connect(function()
 			b.BackgroundTransparency = 1
+			for _, m in ipairs(marks) do
+				m.BackgroundColor3 = COLOR.dim
+			end
+		end))
+		return b, marks
+	end
+
+	local closeBtn = headerButton("close", 1)
+	local minBtn, minMarks = headerButton("min", 2)
+
+	-- toolbar: plain text actions split by thin dividers
+	local toolbar = solid(window, COLOR.window, UDim2.new(1, 0, 0, TOOLBAR), UDim2.fromOffset(0, HEADER))
+	toolbar.Name = "Toolbar"
+	toolbar.ZIndex = 11
+	solid(toolbar, COLOR.line, UDim2.new(1, 0, 0, 1), UDim2.new(0, 0, 1, -1)).ZIndex = 12
+
+	local function toolButton(text: string, index: number, danger: boolean?)
+		local b = Instance.new("TextButton")
+		b.AutoButtonColor = false
+		b.BackgroundTransparency = 1
+		b.BorderSizePixel = 0
+		b.Size = UDim2.new(1 / 3, 0, 1, -1)
+		b.Position = UDim2.new((index - 1) / 3, 0, 0, 0)
+		b.Font = Enum.Font.Code
+		b.TextSize = 12
+		b.TextColor3 = COLOR.dim
+		b.Text = text
+		b.ZIndex = 12
+		b.Parent = toolbar
+
+		local hot = danger and COLOR.bad or COLOR.accent
+		track(b.MouseEnter:Connect(function()
+			b.TextColor3 = hot
+		end))
+		track(b.MouseLeave:Connect(function()
+			b.TextColor3 = COLOR.dim
 		end))
 		track(b.MouseButton1Down:Connect(function()
-			b.BackgroundColor3 = DEX.ButtonPress
-			b.BackgroundTransparency = 0
+			b.TextTransparency = 0.5
 		end))
 		track(b.MouseButton1Up:Connect(function()
-			b.BackgroundColor3 = hoverColor or DEX.ButtonHover
+			b.TextTransparency = 0
 		end))
+
+		if index > 1 then
+			solid(toolbar, COLOR.line, UDim2.new(0, 1, 0, 14), UDim2.new((index - 1) / 3, 0, 0.5, -7)).ZIndex = 12
+		end
 		return b
 	end
 
-	local closeBtn = titleButton("X", 1, DEX.CloseHover)
-	local minBtn = titleButton("-", 2)
+	local refreshBtn = toolButton("RELOAD", 1)
+	local clearBtn = toolButton("DISPEL", 2)
+	local unloadBtn = toolButton("UNLOAD", 3, true)
 
-	local body = Instance.new("Frame")
-	body.Name = "Body"
-	body.BackgroundTransparency = 1
-	body.Position = UDim2.fromOffset(0, TOP)
-	body.Size = UDim2.new(1, 0, 1, -TOP)
-	body.ZIndex = 11
-	body.Parent = window
+	-- footer status line
+	local footer = solid(window, COLOR.header, UDim2.new(1, 0, 0, FOOTER), UDim2.new(0, 0, 1, -FOOTER))
+	footer.Name = "Footer"
+	footer.ZIndex = 11
+	solid(footer, COLOR.line, UDim2.new(1, 0, 0, 1), UDim2.new()).ZIndex = 12
 
-	--// dex styled buttons
+	local statusLabel = Instance.new("TextLabel")
+	statusLabel.Name = "Status"
+	statusLabel.BackgroundTransparency = 1
+	statusLabel.Position = UDim2.fromOffset(12, 1)
+	statusLabel.Size = UDim2.new(1, -24, 1, -1)
+	statusLabel.Font = Enum.Font.Code
+	statusLabel.TextSize = 12
+	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+	statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+	statusLabel.TextColor3 = COLOR.dim
+	statusLabel.Text = "> idle"
+	statusLabel.ZIndex = 12
+	statusLabel.Parent = footer
+
+	local function setStatus(text: string, color: Color3?)
+		statusLabel.Text = "> " .. text
+		statusLabel.TextColor3 = color or COLOR.dim
+	end
+
+	-- the list
+	local list = Instance.new("ScrollingFrame")
+	list.Name = "List"
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.Position = UDim2.fromOffset(0, HEADER + TOOLBAR)
+	list.Size = UDim2.new(1, 0, 1, -(HEADER + TOOLBAR + FOOTER))
+	list.CanvasSize = UDim2.new()
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.ScrollingDirection = Enum.ScrollingDirection.Y
+	list.ScrollBarThickness = 2
+	list.ScrollBarImageColor3 = COLOR.accent
+	list.ElasticBehavior = Enum.ElasticBehavior.Never
+	list.ZIndex = 11
+	list.Parent = window
+
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.FillDirection = Enum.FillDirection.Vertical
+	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	listLayout.Padding = UDim.new(0, 0)
+	listLayout.Parent = list
+
+	--// rows
 
 	local activeBtn = nil
+	local rows = {}
 
-	local function baseColor(btn: TextButton)
-		return btn == activeBtn and DEX.Selection or DEX.Button
-	end
-
-	local function makeButton(parent: Instance, text: string, order: number, height: number, left: boolean?)
-		local btn = Instance.new("TextButton")
-		btn.AutoButtonColor = false
-		btn.Size = UDim2.new(1, -6, 0, height)
-		btn.BackgroundColor3 = DEX.Button
-		btn.BorderColor3 = DEX.Outline2
-		btn.BorderSizePixel = 1
-		btn.Font = Enum.Font.SourceSans
-		btn.TextSize = 15
-		btn.TextColor3 = DEX.Text
-		btn.TextTruncate = Enum.TextTruncate.AtEnd
-		btn.Text = text
-		btn.LayoutOrder = order
-		btn.ZIndex = 12
-		btn.Parent = parent
-		if left then
-			btn.TextXAlignment = Enum.TextXAlignment.Left
-			pad(btn, 10, 10)
+	local function paintRow(btn: TextButton)
+		local r = rows[btn]
+		if not r then return end
+		local active = (btn == activeBtn)
+		r.bar.BackgroundTransparency = active and 0 or 1
+		r.name.TextColor3 = active and COLOR.accent or COLOR.text
+		r.index.TextColor3 = active and COLOR.accent or COLOR.dim
+		if active then
+			r.tag.Text = "ACTIVE"
+			r.tag.TextColor3 = COLOR.accent
+		else
+			r.tag.Text = r.hover and "RUN" or ""
+			r.tag.TextColor3 = COLOR.dim
 		end
-
-		track(btn.MouseEnter:Connect(function()
-			btn.BackgroundColor3 = btn == activeBtn and DEX.Selection or DEX.ButtonHover
-		end))
-		track(btn.MouseLeave:Connect(function()
-			btn.BackgroundColor3 = baseColor(btn)
-		end))
-		track(btn.MouseButton1Down:Connect(function()
-			btn.BackgroundColor3 = btn == activeBtn and DEX.Selection or DEX.ButtonPress
-		end))
-		track(btn.MouseButton1Up:Connect(function()
-			btn.BackgroundColor3 = baseColor(btn)
-		end))
-		return btn
-	end
-
-	local function entryText(btn: TextButton, active: boolean)
-		local label = btn:GetAttribute("Label") or ""
-		btn.Text = (active and "⚡  " or "✨  ") .. label
+		btn.BackgroundColor3 = active and COLOR.rowActive or COLOR.rowHover
+		btn.BackgroundTransparency = (active or r.hover) and 0 or 1
 	end
 
 	local function setActive(btn: TextButton?)
 		local old = activeBtn
 		activeBtn = btn
 		if old and old.Parent then
-			old.BackgroundColor3 = DEX.Button
-			entryText(old, false)
+			paintRow(old)
 		end
 		if btn then
-			btn.BackgroundColor3 = DEX.Selection
-			entryText(btn, true)
+			paintRow(btn)
 		end
 	end
 
-	-- controls row
-	local controls = Instance.new("Frame")
-	controls.Name = "Controls"
-	controls.BackgroundTransparency = 1
-	controls.Position = UDim2.fromOffset(4, 4)
-	controls.Size = UDim2.new(1, -8, 0, 28)
-	controls.ZIndex = 11
-	controls.Parent = body
-
-	local controlsLayout = Instance.new("UIListLayout")
-	controlsLayout.FillDirection = Enum.FillDirection.Horizontal
-	controlsLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	controlsLayout.Padding = UDim.new(0, 4)
-	controlsLayout.Parent = controls
-
-	local refreshBtn = makeButton(controls, "reload", 1, 28)
-	local clearBtn = makeButton(controls, "dispel", 2, 28)
-	local unloadBtn = makeButton(controls, "unload", 3, 28)
-	for _, b in ipairs({ refreshBtn, clearBtn, unloadBtn }) do
-		b.Size = UDim2.new(1 / 3, -3, 1, 0)
+	local function flashRow(btn: TextButton)
+		local r = rows[btn]
+		if not r then return end
+		r.flash.BackgroundTransparency = 0.65
+		tweenTo(r.flash, { BackgroundTransparency = 1 }, 0.6)
 	end
 
-	local statusLabel = Instance.new("TextLabel")
-	statusLabel.Name = "Status"
-	statusLabel.BackgroundTransparency = 1
-	statusLabel.Position = UDim2.fromOffset(8, 36)
-	statusLabel.Size = UDim2.new(1, -16, 0, 18)
-	statusLabel.Font = Enum.Font.SourceSans
-	statusLabel.TextSize = 14
-	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-	statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
-	statusLabel.TextColor3 = DEX.Sub
-	statusLabel.Text = "the book is closed"
-	statusLabel.ZIndex = 11
-	statusLabel.Parent = body
+	local function makeRow(index: number, label: string)
+		local btn = Instance.new("TextButton")
+		btn.Name = "Row"
+		btn.AutoButtonColor = false
+		btn.BackgroundColor3 = COLOR.rowHover
+		btn.BackgroundTransparency = 1
+		btn.BorderSizePixel = 0
+		btn.Text = ""
+		btn.Size = UDim2.new(1, 0, 0, 36)
+		btn.LayoutOrder = index
+		btn.ZIndex = 12
+		btn:SetAttribute("Entry", true)
+		btn.Parent = list
 
-	local function setStatus(text: string, color: Color3?)
-		statusLabel.Text = text
-		statusLabel.TextColor3 = color or DEX.Sub
+		local flash = solid(btn, COLOR.accent, UDim2.fromScale(1, 1), UDim2.new())
+		flash.BackgroundTransparency = 1
+		flash.ZIndex = 12
+
+		local bar = solid(btn, COLOR.accent, UDim2.fromOffset(3, 20), UDim2.new(0, 0, 0.5, -10))
+		bar.BackgroundTransparency = 1
+		bar.ZIndex = 14
+
+		local idx = Instance.new("TextLabel")
+		idx.BackgroundTransparency = 1
+		idx.Position = UDim2.fromOffset(14, 0)
+		idx.Size = UDim2.fromOffset(22, 36)
+		idx.Font = Enum.Font.Code
+		idx.TextSize = 12
+		idx.TextXAlignment = Enum.TextXAlignment.Left
+		idx.TextColor3 = COLOR.dim
+		idx.Text = string.format("%02d", index)
+		idx.ZIndex = 14
+		idx.Parent = btn
+
+		local name = Instance.new("TextLabel")
+		name.BackgroundTransparency = 1
+		name.Position = UDim2.fromOffset(44, 0)
+		name.Size = UDim2.new(1, -44 - 64, 1, 0)
+		name.Font = Enum.Font.GothamMedium
+		name.TextSize = 13
+		name.TextXAlignment = Enum.TextXAlignment.Left
+		name.TextTruncate = Enum.TextTruncate.AtEnd
+		name.TextColor3 = COLOR.text
+		name.Text = label
+		name.ZIndex = 14
+		name.Parent = btn
+
+		local tag = Instance.new("TextLabel")
+		tag.BackgroundTransparency = 1
+		tag.Position = UDim2.new(1, -64, 0, 0)
+		tag.Size = UDim2.fromOffset(52, 36)
+		tag.Font = Enum.Font.Code
+		tag.TextSize = 10
+		tag.TextXAlignment = Enum.TextXAlignment.Right
+		tag.TextColor3 = COLOR.dim
+		tag.Text = ""
+		tag.ZIndex = 14
+		tag.Parent = btn
+
+		solid(btn, COLOR.line, UDim2.new(1, -24, 0, 1), UDim2.new(0, 12, 1, -1)).ZIndex = 13
+
+		rows[btn] = { bar = bar, name = name, index = idx, tag = tag, flash = flash, hover = false }
+
+		track(btn.MouseEnter:Connect(function()
+			rows[btn].hover = true
+			paintRow(btn)
+		end))
+		track(btn.MouseLeave:Connect(function()
+			rows[btn].hover = false
+			paintRow(btn)
+		end))
+		return btn
 	end
-
-	-- vertical spell list
-	local list = Instance.new("ScrollingFrame")
-	list.Name = "List"
-	list.BackgroundColor3 = Color3.fromRGB(16, 11, 30)
-	list.BackgroundTransparency = 0.1
-	list.BorderColor3 = DEX.Outline1
-	list.BorderSizePixel = 1
-	list.Position = UDim2.fromOffset(4, 58)
-	list.Size = UDim2.new(1, -8, 1, -62)
-	list.CanvasSize = UDim2.new()
-	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	list.ScrollingDirection = Enum.ScrollingDirection.Y
-	list.ScrollBarThickness = 3
-	list.ScrollBarImageColor3 = DEX.Glow
-	list.ElasticBehavior = Enum.ElasticBehavior.Never
-	list.ZIndex = 11
-	list.Parent = body
-
-	local listLayout = Instance.new("UIListLayout")
-	listLayout.FillDirection = Enum.FillDirection.Vertical
-	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	listLayout.Padding = UDim.new(0, 3)
-	listLayout.Parent = list
-
-	local listPadding = Instance.new("UIPadding")
-	listPadding.PaddingTop = UDim.new(0, 3)
-	listPadding.PaddingLeft = UDim.new(0, 3)
-	listPadding.PaddingBottom = UDim.new(0, 3)
-	listPadding.Parent = list
 
 	--// window state: open / close, minimize
 
@@ -464,13 +545,13 @@ local function main()
 		local vp = viewport()
 		local w = math.min(CONFIG.WindowWidth, vp.X - 56)
 		local y = CONFIG.TabY + CONFIG.TabHeight + 8
-		local h = math.max(140, math.min(CONFIG.WindowHeight, vp.Y - y - 8))
+		local h = math.max(160, math.min(CONFIG.WindowHeight, vp.Y - y - 8))
 		return w, y, h
 	end
 
 	local function openGoal()
 		local w, y, h = metrics()
-		return UDim2.new(1, -8, 0, y), UDim2.fromOffset(w, minimized and TOP or h)
+		return UDim2.new(1, -8, 0, y), UDim2.fromOffset(w, minimized and HEADER or h)
 	end
 
 	local function closedPos()
@@ -491,7 +572,7 @@ local function main()
 			tweenTo(window, { Position = pos, Size = sz })
 		else
 			tweenTo(window, { Position = closedPos() })
-			task.delay(CONFIG.SlideSpeed + 0.03, function()
+			task.delay(CONFIG.SlideSpeed + 0.05, function()
 				if not isOpen and window then
 					window.Visible = false
 				end
@@ -501,7 +582,11 @@ local function main()
 
 	local function setMinimized(state: boolean)
 		minimized = state
-		minBtn.Text = state and "+" or "-"
+		-- the minimize mark becomes a box edge when collapsed
+		for _, m in ipairs(minMarks) do
+			m.Size = state and UDim2.fromOffset(10, 8) or UDim2.fromOffset(10, 2)
+			m.Position = state and UDim2.new(0.5, -5, 0.5, -4) or UDim2.new(0.5, -5, 0.5, -1)
+		end
 		if isOpen then
 			local pos, sz = openGoal()
 			tweenTo(window, { Position = pos, Size = sz })
@@ -521,17 +606,7 @@ local function main()
 		end
 	end)
 
-	-- the tab glows slowly
-	task.spawn(function()
-		local dim = false
-		while alive and gui do
-			tweenTo(tabStroke, { Transparency = dim and 0.15 or 0.75 }, 1.1)
-			dim = not dim
-			task.wait(1.1)
-		end
-	end)
-
-	--// remove the previous spell: tools, guis, threads, connections
+	--// remove the previous script: tools, guis, threads, connections
 	--// nothing here touches the script's environment
 
 	local function snapshot()
@@ -691,28 +766,28 @@ local function main()
 		return true
 	end
 
-	--// cast a repo file
+	--// run a repo file
 
 	local busy = false
 
 	local function runEntry(entry, btn: TextButton)
 		if busy then return end
 		busy = true
-		setStatus("summoning " .. entry.name .. "...")
+		setStatus("fetching " .. entry.name .. "...")
 
 		local src = httpGet(entry.url, false)
 		if not src then
-			setStatus("failed to fetch " .. entry.name, DEX.Important)
-			notify("spellbook", "failed to fetch " .. entry.name)
+			setStatus("fetch failed: " .. entry.name, COLOR.bad)
+			notify("spells", "failed to fetch " .. entry.name)
 			busy = false
 			return
 		end
 
 		local fn, compileErr = loadstring(src, "=repohub_" .. entry.name)
 		if not fn then
-			setStatus("compile error in " .. entry.name, DEX.Important)
-			notify("spellbook", "compile error in " .. entry.name)
-			warn("[spellbook] " .. tostring(compileErr))
+			setStatus("compile error: " .. entry.name, COLOR.bad)
+			notify("spells", "compile error in " .. entry.name)
+			warn("[spells] " .. tostring(compileErr))
 			busy = false
 			return
 		end
@@ -730,16 +805,17 @@ local function main()
 		}
 		currentRun = run
 		setActive(btn)
+		flashRow(btn)
 
 		local th = task.spawn(function()
 			local ok, runErr = pcall(fn)
 			if ok then
-				setStatus("casting " .. entry.name, DEX.Good)
-				notify("spellbook", "cast " .. entry.name)
+				setStatus("running " .. entry.name, COLOR.good)
+				notify("spells", "running " .. entry.name)
 			else
-				setStatus("the spell failed: " .. entry.name, DEX.Important)
-				notify("spellbook", "runtime error in " .. entry.name)
-				warn("[spellbook] " .. tostring(runErr))
+				setStatus("runtime error: " .. entry.name, COLOR.bad)
+				notify("spells", "runtime error in " .. entry.name)
+				warn("[spells] " .. tostring(runErr))
 			end
 		end)
 		table.insert(run.threads, th)
@@ -764,6 +840,7 @@ local function main()
 				if child == activeBtn then
 					activeBtn = nil
 				end
+				rows[child] = nil
 				child:Destroy()
 			end
 		end
@@ -773,12 +850,12 @@ local function main()
 		if scanning then return end
 		scanning = true
 		clearEntries()
-		setStatus("searching the library...")
+		setStatus("scanning repo...")
 		local entries = {}
 		local err = scan(CONFIG.StartPath, 0, entries)
 
 		if err and #entries == 0 then
-			setStatus("scan failed: " .. err, DEX.Important)
+			setStatus("scan failed: " .. err, COLOR.bad)
 			loaded = false
 			scanning = false
 			return
@@ -790,10 +867,7 @@ local function main()
 
 		for i, entry in ipairs(entries) do
 			local label = string.gsub(entry.path, "%.%w+$", "")
-			local btn = makeButton(list, "", i, 32, true)
-			btn:SetAttribute("Entry", true)
-			btn:SetAttribute("Label", label)
-			entryText(btn, false)
+			local btn = makeRow(i, label)
 
 			if currentRun and currentRun.path == entry.path then
 				setActive(btn)
@@ -806,9 +880,9 @@ local function main()
 
 		loaded = #entries > 0
 		if #entries == 0 then
-			setStatus("no spells found in the repo", DEX.Important)
+			setStatus("no scripts found", COLOR.bad)
 		else
-			setStatus(#entries .. " spell(s) ready", DEX.Sub)
+			setStatus(#entries .. " script(s) loaded")
 		end
 		scanning = false
 	end
@@ -837,10 +911,10 @@ local function main()
 
 	track(clearBtn.MouseButton1Click:Connect(function()
 		if stopCurrent() then
-			setStatus("dispelled", DEX.Sub)
-			notify("spellbook", "removed the active spell")
+			setStatus("removed the active script")
+			notify("spells", "removed the active script")
 		else
-			setStatus("no active spell", DEX.Sub)
+			setStatus("nothing active")
 		end
 	end))
 
@@ -853,6 +927,6 @@ end
 
 local ok, err = pcall(main)
 if not ok then
-	warn("[spellbook] " .. tostring(err))
-	notify("spellbook error", tostring(err))
+	warn("[spells] " .. tostring(err))
+	notify("spells error", tostring(err))
 end
