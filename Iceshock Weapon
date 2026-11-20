@@ -1,0 +1,1880 @@
+-- =====================================================================
+-- ICESHOCK ONLY  (client only, no server script)
+-- Works on R6 and R15. Tries asset 1 (Snowgrave tool R6), then asset 2 (Snowgrave DELTARUNE
+-- tool SCRIPTED). Their own scripts are removed (a server script cannot
+-- run from the client), the model / sounds / animations are kept and the
+-- Snowgrave spell itself is run by this script. If neither asset can be
+-- loaded, a built-in Snowgrave staff is made instead.
+-- Click (or tap): pray pose, snow flies to the sky, beam falls where you aimed.
+-- =====================================================================
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Debris = game:GetService("Debris")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local StarterGui = game:GetService("StarterGui")
+local InsertService = game:GetService("InsertService")
+local lp = Players.LocalPlayer
+local env = (getgenv and getgenv()) or _G
+if env.__IceshockStop then pcall(env.__IceshockStop) end
+
+local CFG = {
+	assets = { 104462944256312, 88831954909283 },
+	toolName = "Snowgrave",
+	cooldown = 4,
+	radius = 28,
+	maxRange = 1000,
+	freezeTime = 5.5,
+	freezeNPCs = true,
+	killNPCs = true,
+	shake = true,
+	extraSoundIds = {},
+	soundPray = 74133338551128,
+	prayTime = 3.2,
+	emitterScale = 36,
+	beamScale = 2, -- beam width multiplier
+	rateMult = 0.5, -- multiplies every continuous emitter rate (lag)
+	emitMult = 0.6, -- multiplies every one-shot burst count (lag)
+	soundBeam = 85007055364574,
+	soundIce = 118057699670532,
+}
+
+local conns, alive = {}, true
+local function conn(c)
+	conns[#conns + 1] = c
+	return c
+end
+
+local function notify(text)
+	pcall(function()
+		StarterGui:SetCore("SendNotification", { Title = "Iceshock", Text = text, Duration = 5 })
+	end)
+end
+
+local function report(tag, err)
+	local msg = tostring(err)
+	warn("[Iceshock] " .. tag .. ": " .. msg)
+	notify(tag .. ": " .. msg:sub(1, 200))
+end
+
+-- ===================== NETWORK OWNERSHIP + SIMULATION RADIUS =====================
+local function simBoost()
+	pcall(function() sethiddenproperty(lp, "SimulationRadius", math.huge) end)
+	pcall(function() lp.MaximumSimulationRadius = math.huge end)
+	pcall(function() if setsimulationradius then setsimulationradius(math.huge, math.huge) end end)
+end
+simBoost()
+do
+	local acc = 0
+	conn(RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc >= 1 then
+			acc = 0
+			simBoost()
+		end
+	end))
+end
+
+-- ===================== EFFECTS =====================
+local fxFolder = Instance.new("Folder")
+fxFolder.Name = "IceshockFX"
+fxFolder.Parent = workspace
+
+local function fxPart(props)
+	local p = Instance.new("Part")
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.CastShadow = false
+	p.Massless = true
+	for k, v in pairs(props) do p[k] = v end
+	p.Parent = fxFolder
+	return p
+end
+
+local ICE = Color3.fromRGB(190, 235, 255)
+local rng = Random.new()
+
+local function tween(inst, t, goal, style, dir)
+	local tw = TweenService:Create(inst, TweenInfo.new(t, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), goal)
+	tw:Play()
+	return tw
+end
+
+local function shakeCamera(power, dur)
+	if not CFG.shake then return end
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	local t0 = os.clock()
+	local name = "SnowgraveShake" .. tostring(t0)
+	RunService:BindToRenderStep(name, Enum.RenderPriority.Camera.Value + 2, function()
+		local k = 1 - (os.clock() - t0) / dur
+		if k <= 0 then
+			RunService:UnbindFromRenderStep(name)
+			return
+		end
+		cam.CFrame = cam.CFrame * CFrame.new(rng:NextNumber(-1, 1) * power * k, rng:NextNumber(-1, 1) * power * k, 0)
+	end)
+end
+
+local function skyTint()
+	local cc = Instance.new("ColorCorrectionEffect")
+	cc.Name = "SnowgraveTint"
+	cc.Parent = Lighting
+	tween(cc, 0.35, { TintColor = Color3.fromRGB(232, 243, 255), Brightness = 0.04, Saturation = -0.08 })
+	task.delay(CFG.freezeTime + 0.6, function()
+		tween(cc, 1.2, { TintColor = Color3.new(1, 1, 1), Brightness = 0, Saturation = 0 })
+		Debris:AddItem(cc, 1.4)
+	end)
+end
+
+local function blizzard(pos)
+	local r = CFG.radius
+	local cloud = fxPart({
+		Transparency = 1,
+		Size = Vector3.new(r * 2, 1, r * 2),
+		CFrame = CFrame.new(pos + Vector3.new(0, 46, 0)),
+	})
+	local snow = Instance.new("ParticleEmitter")
+	snow.Texture = "rbxasset://textures/particles/sparkles_main.dng"
+	snow.Rate = 90
+	snow.Lifetime = NumberRange.new(1.4, 2)
+	snow.Speed = NumberRange.new(24, 38)
+	snow.EmissionDirection = Enum.NormalId.Bottom
+	snow.SpreadAngle = Vector2.new(12, 12)
+	snow.Acceleration = Vector3.new(16, -26, 6)
+	snow.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.9), NumberSequenceKeypoint.new(1, 0.4) })
+	snow.LightEmission = 0.7
+	snow.Color = ColorSequence.new(Color3.new(1, 1, 1), ICE)
+	snow.Parent = cloud
+
+	local fog = fxPart({
+		Transparency = 1,
+		Size = Vector3.new(r * 2, 1, r * 2),
+		CFrame = CFrame.new(pos + Vector3.new(0, 3, 0)),
+	})
+	local mist = Instance.new("ParticleEmitter")
+	mist.Texture = "rbxasset://textures/particles/smoke_main.dng"
+	mist.Rate = 12
+	mist.Lifetime = NumberRange.new(1.5, 2.4)
+	mist.Speed = NumberRange.new(4, 9)
+	mist.EmissionDirection = Enum.NormalId.Top
+	mist.SpreadAngle = Vector2.new(60, 60)
+	mist.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 7), NumberSequenceKeypoint.new(1, 14) })
+	mist.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.7), NumberSequenceKeypoint.new(1, 1) })
+	mist.Color = ColorSequence.new(Color3.fromRGB(215, 240, 255))
+	mist.Parent = fog
+
+	task.delay(CFG.freezeTime + 0.4, function()
+		snow.Enabled = false
+		mist.Enabled = false
+	end)
+	Debris:AddItem(cloud, CFG.freezeTime + 4)
+	Debris:AddItem(fog, CFG.freezeTime + 4)
+end
+
+local function groundRing(pos)
+	local ring = fxPart({
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.4, 2, 2),
+		CFrame = CFrame.new(pos + Vector3.new(0, 0.3, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+		Material = Enum.Material.Neon,
+		Color = ICE,
+		Transparency = 0.25,
+	})
+	tween(ring, 0.7, { Size = Vector3.new(0.4, CFG.radius * 2, CFG.radius * 2), Transparency = 1 })
+	Debris:AddItem(ring, 1)
+
+	local flash = fxPart({ Transparency = 1, Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(pos + Vector3.new(0, 6, 0)) })
+	local light = Instance.new("PointLight")
+	light.Color = Color3.fromRGB(170, 225, 255)
+	light.Range = 60
+	light.Brightness = 8
+	light.Parent = flash
+	tween(light, 1.6, { Brightness = 0 })
+	Debris:AddItem(flash, 2)
+end
+
+local function smokePuff(pos, size, count)
+	local p = fxPart({ Transparency = 1, Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(pos) })
+	local sm = Instance.new("ParticleEmitter")
+	sm.Texture = "rbxasset://textures/particles/smoke_main.dng"
+	sm.Rate = 0
+	sm.Lifetime = NumberRange.new(1.2, 2.1)
+	sm.Speed = NumberRange.new(6, 18)
+	sm.SpreadAngle = Vector2.new(75, 75)
+	sm.Acceleration = Vector3.new(0, 4, 0)
+	sm.Drag = 2.5
+	sm.Rotation = NumberRange.new(0, 360)
+	sm.RotSpeed = NumberRange.new(-60, 60)
+	sm.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, size * 0.5),
+		NumberSequenceKeypoint.new(0.4, size),
+		NumberSequenceKeypoint.new(1, size * 1.7),
+	})
+	sm.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.45),
+		NumberSequenceKeypoint.new(0.6, 0.72),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	sm.Color = ColorSequence.new(Color3.fromRGB(240, 248, 255), Color3.fromRGB(165, 195, 230))
+	sm.Parent = p
+
+	local glint = Instance.new("ParticleEmitter")
+	glint.Texture = "rbxasset://textures/particles/sparkles_main.dng"
+	glint.Rate = 0
+	glint.Lifetime = NumberRange.new(0.6, 1.3)
+	glint.Speed = NumberRange.new(12, 36)
+	glint.SpreadAngle = Vector2.new(120, 120)
+	glint.Acceleration = Vector3.new(0, -30, 0)
+	glint.Drag = 1.5
+	glint.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, size * 0.22), NumberSequenceKeypoint.new(1, 0) })
+	glint.LightEmission = 1
+	glint.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(130, 205, 255))
+	glint.Parent = p
+
+	sm:Emit(count)
+	glint:Emit(count * 2)
+	Debris:AddItem(p, 3.5)
+end
+
+-- ===================== CASTING =====================
+local SoundService = game:GetService("SoundService")
+local PRAY = { lift = 105, yaw = 36, raise = 1.3, hold = 2.4, lower = 0.9, fallback = 3.2, skyH = 240 }
+
+-- ===================== LOGGED EMITTERS (rebuilt from properties) =====================
+local function NS(...) return NumberSequence.new({ ... }) end
+local function K(t, v, e) return NumberSequenceKeypoint.new(t, v, e or 0) end
+local BLUE_A = ColorSequence.new(Color3.fromRGB(130, 195, 255), Color3.fromRGB(220, 242, 255))
+local FLASH_COLOR = ColorSequence.new(Color3.fromRGB(150, 200, 255))
+local FLASH_TRANS = NS(K(0, 0), K(0.528013, 0), K(0.71723, 0.89375), K(1, 1))
+
+local COMMON = {
+	Acceleration = Vector3.new(0, 0, 0),
+	Drag = 0,
+	EmissionDirection = Enum.NormalId.Top,
+	LightInfluence = 0,
+	ZOffset = 0,
+	VelocityInheritance = 0,
+	TimeScale = 1,
+	Squash = NS(K(0, 0), K(1, 0)),
+	Shape = Enum.ParticleEmitterShape.Box,
+	ShapeInOut = Enum.ParticleEmitterShapeInOut.Outward,
+	ShapeStyle = Enum.ParticleEmitterShapeStyle.Volume,
+	ShapePartial = 1,
+}
+
+local EM = {
+	Aura1 = { name = "Aura", enabled = true, emit = 15, props = {
+		Texture = "rbxassetid://15269497616", Rate = 200,
+		Lifetime = NumberRange.new(0.5, 0.75), Speed = NumberRange.new(0.1, 5),
+		Size = NS(K(0, 0), K(0.0972887, 3.32386, 3.32386), K(0.255183, 4.91477, 3.17849), K(0.535885, 5.9375, 3.12903), K(0.787879, 4.60227, 3.39676), K(1, 1.00111, 1.00111)),
+		Color = ColorSequence.new(Color3.fromRGB(130, 195, 255)),
+		Transparency = NS(K(0, 0), K(1, 0)),
+		Rotation = NumberRange.new(-360, 360), RotSpeed = NumberRange.new(-400, 400),
+		SpreadAngle = Vector2.new(360, 360), LightEmission = 0, LockedToPart = true,
+		Orientation = Enum.ParticleOrientation.VelocityPerpendicular,
+		FlipbookLayout = Enum.ParticleFlipbookLayout.Grid4x4, FlipbookMode = Enum.ParticleFlipbookMode.OneShot,
+		FlipbookFramerate = NumberRange.new(10, 20), FlipbookStartRandom = true, Brightness = 6,
+	} },
+	Aura2 = { name = "Aura", enabled = true, emit = 15, props = {
+		Texture = "http://www.roblox.com/asset/?id=6700006778", Rate = 100,
+		Lifetime = NumberRange.new(0.2, 0.3), Speed = NumberRange.new(0.01, 0.01),
+		Size = NS(K(0, 10), K(0.530675, 7.44318), K(1, 0)),
+		Color = BLUE_A,
+		Transparency = NS(K(0, 1), K(1, 0)),
+		Rotation = NumberRange.new(0, 360), RotSpeed = NumberRange.new(200, 400),
+		SpreadAngle = Vector2.new(360, 360), LightEmission = 0, LockedToPart = true,
+		Orientation = Enum.ParticleOrientation.VelocityPerpendicular,
+		FlipbookLayout = Enum.ParticleFlipbookLayout.None, FlipbookMode = Enum.ParticleFlipbookMode.Loop,
+		FlipbookFramerate = NumberRange.new(1, 1), FlipbookStartRandom = false, Brightness = 6,
+	} },
+	Dust = { name = "Dust", enabled = false, emit = 15, props = {
+		Texture = "rbxassetid://13026594575", Rate = 100,
+		Lifetime = NumberRange.new(0.3, 0.5), Speed = NumberRange.new(0.1, 5),
+		Size = NS(K(0, 0), K(0.064212, 8.18667, 8.43984), K(0.202212, 13.4991, 8.20961), K(0.426212, 19.1547, 12.386), K(0.702212, 22.1535, 11.1565), K(1, 23.7977, 9.30553)),
+		Color = BLUE_A,
+		Transparency = NS(K(0, 0), K(0.5, 0), K(1, 1)),
+		Rotation = NumberRange.new(-360, 360), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(10, 10), Drag = 8, EmissionDirection = Enum.NormalId.Front,
+		LightEmission = 0, LockedToPart = false, Orientation = Enum.ParticleOrientation.FacingCamera,
+		FlipbookLayout = Enum.ParticleFlipbookLayout.Grid8x8, FlipbookMode = Enum.ParticleFlipbookMode.Loop,
+		FlipbookFramerate = NumberRange.new(10, 30), FlipbookStartRandom = true, Brightness = 6,
+	} },
+	Flash = { name = "Flash", enabled = true, emit = 1, props = {
+		Texture = "rbxassetid://12993580758", Rate = 50.2429,
+		Lifetime = NumberRange.new(0.0155463, 0.0310925), Speed = NumberRange.new(0.0020965, 0.0020965),
+		Size = NS(K(0, 0), K(0.1, 0.627648), K(0.2, 1.22055), K(0.3, 1.77464), K(0.4, 2.28493), K(0.5, 2.74513), K(0.6, 3.1472), K(0.7, 3.48056), K(0.8, 3.73109), K(0.9, 3.88064), K(1, 3.91909)),
+		Color = FLASH_COLOR, Transparency = FLASH_TRANS,
+		Rotation = NumberRange.new(-360, 360), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(-360, 360), LightEmission = -15, LockedToPart = true, ZOffset = 1.5,
+		Orientation = Enum.ParticleOrientation.VelocityParallel,
+		FlipbookLayout = Enum.ParticleFlipbookLayout.None, FlipbookMode = Enum.ParticleFlipbookMode.Loop,
+		FlipbookFramerate = NumberRange.new(6.43241, 6.43241), FlipbookStartRandom = false, Brightness = 25,
+	} },
+	Flash2 = { name = "Flash2", enabled = true, emit = 1, props = {
+		Texture = "rbxassetid://13853120945", Rate = 14.8988,
+		Lifetime = NumberRange.new(0.0357549, 0.0357549), Speed = NumberRange.new(0.00454326, 0.00454326),
+		Size = NS(K(0, 4.52715), K(0.1, 4.50448), K(0.2, 4.42118), K(0.3, 4.2348), K(0.4, 3.82065), K(0.5, 2.19964), K(0.6, 0.689516), K(0.7, 0.287386), K(0.8, 0.104488), K(0.9, 0.0223917), K(1, 0)),
+		Color = FLASH_COLOR, Transparency = FLASH_TRANS,
+		Rotation = NumberRange.new(-360, 360), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(-360, 360), LightEmission = -5, LockedToPart = true, ZOffset = 1.5,
+		Orientation = Enum.ParticleOrientation.FacingCamera,
+		FlipbookLayout = Enum.ParticleFlipbookLayout.None, FlipbookMode = Enum.ParticleFlipbookMode.Loop,
+		FlipbookFramerate = NumberRange.new(4.33508, 4.33508), FlipbookStartRandom = false, Brightness = 45,
+	} },
+	Hit = { name = "Hit", enabled = false, emit = 30, props = {
+		Texture = "rbxassetid://1053548563", Rate = 100,
+		Lifetime = NumberRange.new(0.2, 0.2), Speed = NumberRange.new(0.01, 0.01),
+		Size = NS(K(0, 100), K(1, 100)),
+		Color = ColorSequence.new(Color3.fromRGB(185, 228, 255)),
+		Transparency = NS(K(0, 0), K(1, 1)),
+		Rotation = NumberRange.new(-360, 360), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(360, 360), LightEmission = 1, LockedToPart = false,
+		Orientation = Enum.ParticleOrientation.VelocityPerpendicular,
+		Squash = NS(K(0, -3), K(1, 0)),
+		FlipbookLayout = Enum.ParticleFlipbookLayout.None, FlipbookMode = Enum.ParticleFlipbookMode.Loop,
+		FlipbookFramerate = NumberRange.new(1, 1), FlipbookStartRandom = false, Brightness = 5,
+	} },
+	HitBase = { name = "HitBase", enabled = false, emit = 30, props = {
+		Texture = "rbxassetid://1053548563", Rate = 100,
+		Lifetime = NumberRange.new(0.05, 0.05), Speed = NumberRange.new(0.01, 0.01),
+		Size = NS(K(0, 50), K(1, 50)),
+		Color = ColorSequence.new(Color3.fromRGB(185, 228, 255)),
+		Transparency = NS(K(0, 0), K(1, 1)),
+		Rotation = NumberRange.new(-360, 360), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(360, 360), LightEmission = 1, LockedToPart = false,
+		Orientation = Enum.ParticleOrientation.VelocityPerpendicular,
+		Squash = NS(K(0, -3), K(1, 0)),
+		FlipbookLayout = Enum.ParticleFlipbookLayout.None, FlipbookMode = Enum.ParticleFlipbookMode.Loop,
+		FlipbookFramerate = NumberRange.new(1, 1), FlipbookStartRandom = false, Brightness = 5,
+	} },
+	Star12 = { name = "Star12", enabled = true, emit = 2, props = {
+		Texture = "rbxassetid://17062452122", Rate = 33,
+		Lifetime = NumberRange.new(0.05, 0.05), Speed = NumberRange.new(0.0888274, 0.0888274),
+		Size = NS(K(0, 0), K(0.1, 1.97127), K(0.2, 3.23692), K(0.3, 4.2031), K(0.4, 4.99371), K(0.5, 5.66687), K(0.6, 6.25589), K(0.7, 6.78246), K(0.8, 7.26233), K(0.9, 7.70824), K(1, 8.13194)),
+		Color = ColorSequence.new(Color3.fromRGB(165, 210, 255)),
+		Transparency = NS(K(0, 0), K(1, 0)),
+		Rotation = NumberRange.new(0, 0), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(0, 0), LightEmission = 1, LockedToPart = true, ZOffset = 1.5,
+		Orientation = Enum.ParticleOrientation.FacingCamera,
+		Squash = NS(K(0, 1.2), K(0.499376, -0.370213, 0.53617), K(0.533019, -0.75, 0.536202), K(1, -0.525, 0.561702)),
+		FlipbookLayout = Enum.ParticleFlipbookLayout.None, FlipbookMode = Enum.ParticleFlipbookMode.Loop,
+		FlipbookFramerate = NumberRange.new(1.09233, 1.09233), FlipbookStartRandom = false, Brightness = 25,
+	} },
+
+	-- ===== the 4 logged particle emitters (cracks / debris / glass) =====
+	Crack = { name = "CRACK_00000", enabled = false, emit = 1, props = {
+		Texture = "rbxassetid://116852757864858", Rate = 2,
+		Lifetime = NumberRange.new(0.2, 0.2), Speed = NumberRange.new(0.012693, 0.012693),
+		Size = NS(K(0, 0, 0), K(0.1, 8.58044, 0.858044), K(0.2, 10.3394, 0.858044), K(0.3, 11.1975, 0.858044), K(0.4, 11.6908, 0.858044), K(0.5, 11.9912, 0.858044), K(0.6, 12.1842, 0.858044), K(0.7, 12.3344, 0.858044), K(0.8, 12.4631, 0.858044), K(0.9, 12.6132, 0.858044), K(1, 12.742, 0.858044)),
+		Color = ColorSequence.new({ ColorSequenceKeypoint.new(0, Color3.new(0.156863, 0.521569, 1)), ColorSequenceKeypoint.new(0.525, Color3.new(0, 0, 0)), ColorSequenceKeypoint.new(1, Color3.new(0, 0, 0)) }),
+		Transparency = NS(K(0, 0.33), K(0.55, 0.33), K(1, 1)),
+		Rotation = NumberRange.new(-360, 360), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(0, 0), LightEmission = 0.7, LockedToPart = false,
+		Orientation = Enum.ParticleOrientation.VelocityPerpendicular,
+		FlipbookLayout = Enum.ParticleFlipbookLayout.Grid4x4, FlipbookMode = Enum.ParticleFlipbookMode.OneShot,
+		FlipbookFramerate = NumberRange.new(1, 1), FlipbookStartRandom = false, Brightness = 100,
+	} },
+	IceDebris = { name = "Debris1", enabled = false, emit = 20, props = {
+		Texture = "rbxassetid://12713358298", Rate = 60,
+		Lifetime = NumberRange.new(0.1, 0.1), Speed = NumberRange.new(57.0935, 114.187),
+		Size = NS(K(0, 0), K(0.18, 1.58593, 0.856402), K(1, 0)),
+		Color = ColorSequence.new(Color3.new(0.470588, 0.760784, 1)),
+		Transparency = NS(K(0, 0), K(1, 0)),
+		Rotation = NumberRange.new(0, 0), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(360, 360), Acceleration = Vector3.new(0, 1.68083, 0), Drag = 12,
+		EmissionDirection = Enum.NormalId.Left, LightEmission = 1, ZOffset = 1, LockedToPart = false,
+		Orientation = Enum.ParticleOrientation.FacingCamera,
+		FlipbookLayout = Enum.ParticleFlipbookLayout.None, FlipbookMode = Enum.ParticleFlipbookMode.OneShot,
+		FlipbookFramerate = NumberRange.new(14, 25), FlipbookStartRandom = false, Brightness = 2,
+	} },
+	ChromaGlass = { name = "chroma glass", enabled = false, emit = 25, props = {
+		Texture = "rbxassetid://124619276075298", Rate = 25,
+		Lifetime = NumberRange.new(1, 5), Speed = NumberRange.new(0, 78.21),
+		Size = NS(K(0, 0.776397), K(0.0697385, 1.55279), K(0.0772105, 4.27019), K(0.144458, 1.86335), K(0.271482, 0.543478), K(0.924035, 0.776397), K(1, 0)),
+		Color = ColorSequence.new(Color3.new(1, 1, 1)),
+		Transparency = NS(K(0, 0), K(1, 1)),
+		Rotation = NumberRange.new(-360, 360), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(360, 360), Acceleration = Vector3.new(0, -20.0513, 0), Drag = 10.02,
+		EmissionDirection = Enum.NormalId.Top, LightEmission = 0, ZOffset = 0, LockedToPart = false,
+		Orientation = Enum.ParticleOrientation.FacingCamera,
+		FlipbookLayout = Enum.ParticleFlipbookLayout.Grid8x8, FlipbookMode = Enum.ParticleFlipbookMode.OneShot,
+		FlipbookFramerate = NumberRange.new(1, 1), FlipbookStartRandom = false, Brightness = 5,
+	} },
+	GlassShard = { name = "txtr_GlassShard3", enabled = false, emit = 25, props = {
+		Texture = "rbxassetid://93866364075964", Rate = 25,
+		Lifetime = NumberRange.new(1, 5), Speed = NumberRange.new(0, 78.21),
+		Size = NS(K(0, 0.776397), K(0.0697385, 1.55279), K(0.0772105, 4.27019), K(0.144458, 1.86335), K(0.271482, 0.543478), K(0.924035, 0.776397), K(1, 0)),
+		Color = ColorSequence.new(Color3.new(1, 1, 1)),
+		Transparency = NS(K(0, 0), K(1, 1)),
+		Rotation = NumberRange.new(-360, 360), RotSpeed = NumberRange.new(0, 0),
+		SpreadAngle = Vector2.new(360, 360), Acceleration = Vector3.new(0, -20.0513, 0), Drag = 10.02,
+		EmissionDirection = Enum.NormalId.Top, LightEmission = 0, ZOffset = 0, LockedToPart = false,
+		Orientation = Enum.ParticleOrientation.FacingCamera,
+		FlipbookLayout = Enum.ParticleFlipbookLayout.None, FlipbookMode = Enum.ParticleFlipbookMode.OneShot,
+		FlipbookFramerate = NumberRange.new(1, 1), FlipbookStartRandom = false, Brightness = 5,
+	} },
+}
+
+local function scaleSeq(seq, s)
+	local pts = {}
+	for _, k in ipairs(seq.Keypoints) do
+		pts[#pts + 1] = NumberSequenceKeypoint.new(k.Time, k.Value * s, k.Envelope * s)
+	end
+	return NumberSequence.new(pts)
+end
+
+local function buildEmitter(spec, parent, scale)
+	local fx = Instance.new("ParticleEmitter")
+	fx.Name = spec.name
+	fx.Enabled = false
+	for k, v in pairs(COMMON) do pcall(function() fx[k] = v end) end
+	for k, v in pairs(spec.props) do pcall(function() fx[k] = v end) end
+	scale = scale or 1
+	if scale ~= 1 then
+		pcall(function() fx.Size = scaleSeq(fx.Size, scale) end)
+	end
+	pcall(function() fx.Rate = fx.Rate * CFG.rateMult end)
+	fx.Parent = parent
+	return fx
+end
+
+local function startEmitter(fx, spec)
+	if spec.enabled then
+		fx.Enabled = true
+	else
+		fx.Enabled = false
+		pcall(function() fx:Emit(math.max(1, math.floor(spec.emit * CFG.emitMult + 0.5))) end)
+	end
+end
+
+-- ===================== BURST HELPERS (particle emitters instead of physics debris) =====================
+local function anchorAt(pos, life)
+	local p = fxPart({ Transparency = 1, Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(pos) })
+	Debris:AddItem(p, life or 6)
+	return p
+end
+
+local function burstEmit(spec, parent, scale, n)
+	local e = buildEmitter(spec, parent, scale)
+	e.Rate = 0
+	pcall(function() e:Emit(n) end)
+	return e
+end
+
+-- glass shards + ice dust burst (no physics parts = no lag)
+local function iceDebris(pos, n)
+	n = n or 8
+	local a = anchorAt(pos + Vector3.new(0, 1.5, 0), 6.2)
+	burstEmit(EM.IceDebris, a, 2.4, math.clamp(n * 2, 8, 36))
+	burstEmit(EM.GlassShard, a, 1.4, math.clamp(math.floor(n * 0.6), 3, 10))
+	burstEmit(EM.ChromaGlass, a, 1.4, math.clamp(math.floor(n * 0.6), 3, 10))
+end
+
+-- ===================== ICE SPIKES (the 4 logged mesh types) =====================
+-- Ice1 / Ice3 = big, Ice2 / Ice4 = small (sizes from the logger). If the spikes show up
+-- rotated or sideways, change SPIKE_ROT (e.g. CFrame.Angles(math.rad(90), 0, 0)).
+local SPIKE_ROT = CFrame.new()
+local SPIKE_COLOR = Color3.new(0.541176, 0.929412, 1)
+local SPIKE_DEFS = {
+	{ id = 18833161887, size = Vector3.new(3.6414, 5.92375, 3.7065) }, -- Ice1
+	{ id = 18833161892, size = Vector3.new(1.734, 2.82083, 1.765) },   -- Ice2
+	{ id = 18833161895, size = Vector3.new(3.6414, 5.92375, 3.7065) }, -- Ice3
+	{ id = 18833161900, size = Vector3.new(1.734, 2.82083, 1.765) },   -- Ice4
+}
+
+local spikeTpl, spikeBusy = {}, {}
+local function getSpikeTemplate(i)
+	if spikeTpl[i] then return spikeTpl[i] end
+	if spikeBusy[i] then
+		local t0 = os.clock()
+		while spikeBusy[i] and not spikeTpl[i] and os.clock() - t0 < 6 do task.wait() end
+		return spikeTpl[i]
+	end
+	spikeBusy[i] = true
+	local url = "rbxassetid://" .. SPIKE_DEFS[i].id
+	local mp
+	pcall(function()
+		local m = Instance.new("MeshPart")
+		m.MeshId = url
+		if m.MeshId ~= "" then mp = m else m:Destroy() end
+	end)
+	if not mp then
+		pcall(function()
+			mp = InsertService:CreateMeshPartAsync(url, Enum.CollisionFidelity.Box, Enum.RenderFidelity.Automatic)
+		end)
+	end
+	if not mp then
+		pcall(function() -- last resort: plain part + file mesh
+			local part = Instance.new("Part")
+			local sm = Instance.new("SpecialMesh")
+			sm.MeshType = Enum.MeshType.FileMesh
+			sm.MeshId = url
+			sm.Parent = part
+			mp = part
+		end)
+	end
+	if mp then
+		mp.Name = "IceSpike"
+		mp.Anchored = true
+		mp.CanCollide = false
+		mp.CanQuery = false
+		mp.CanTouch = false
+		mp.CastShadow = false
+		mp.Massless = true
+		mp.Material = Enum.Material.Glass
+		mp.Color = SPIKE_COLOR
+		mp.Transparency = 0.1
+		mp.Reflectance = 0
+		pcall(function() mp.CollisionFidelity = Enum.CollisionFidelity.Box end)
+		pcall(function() mp.TextureID = "" end)
+		pcall(function() game:GetService("ContentProvider"):PreloadAsync({ mp }) end) -- load the mesh once, not on first cast
+		spikeTpl[i] = mp
+	end
+	spikeBusy[i] = nil
+	return mp
+end
+
+-- preload meshes + every particle texture at startup so the first cast does not hitch
+task.spawn(function()
+	local list = {}
+	for i = 1, #SPIKE_DEFS do
+		local t = getSpikeTemplate(i)
+		if t then list[#list + 1] = t end
+	end
+	local temp = {}
+	for _, spec in pairs(EM) do
+		local ok, e = pcall(buildEmitter, spec, nil, 1)
+		if ok and e then
+			list[#list + 1] = e
+			temp[#temp + 1] = e
+		end
+	end
+	pcall(function() game:GetService("ContentProvider"):PreloadAsync(list) end)
+	for _, e in ipairs(temp) do pcall(function() e:Destroy() end) end
+end)
+
+local function spikePart(tpl, def, sc, cf, halo)
+	local m = halo and 1.15 or 1
+	local sp = tpl:Clone()
+	sp.Size = def.size * sc * m
+	local sm = sp:FindFirstChildOfClass("SpecialMesh")
+	if sm then sm.Scale = Vector3.new(sc * m, sc * m, sc * m) end
+	if halo then -- soft glowing frost shell around the glass
+		sp.Material = Enum.Material.Neon
+		sp.Color = Color3.fromRGB(150, 225, 255)
+		sp.Transparency = 0.78
+	end
+	sp.CFrame = cf
+	sp.Parent = fxFolder
+	return sp
+end
+
+-- sat = true: a small satellite spike growing next to a big one
+local function iceSpike(pos, mult, sat)
+	mult = mult or 1
+	local idx = rng:NextInteger(1, #SPIKE_DEFS)
+	local tpl = getSpikeTemplate(idx)
+	if not tpl or not alive then return end
+	local def = SPIKE_DEFS[idx]
+	local h = rng:NextNumber(6, 10) * mult
+	local sc = h / def.size.Y
+	local lean = sat and 28 or 12
+	local base = CFrame.new(pos)
+		* CFrame.Angles(0, rng:NextNumber(0, math.pi * 2), 0)
+		* CFrame.Angles(math.rad(rng:NextNumber(-lean, lean)), 0, math.rad(rng:NextNumber(-lean, lean)))
+	local sink = h * 0.06
+	local startCF = base * CFrame.new(0, -h * 0.55, 0) * SPIKE_ROT
+	local endCF = base * CFrame.new(0, h / 2 - sink, 0) * SPIKE_ROT
+
+	local spike = spikePart(tpl, def, sc, startCF, false)
+	local parts = { spike }
+	if mult >= 1.5 and not sat then parts[2] = spikePart(tpl, def, sc, startCF, true) end
+	local delay = sat and rng:NextNumber(0.05, 0.22) or 0
+	for _, p in ipairs(parts) do
+		task.delay(delay, function()
+			if p.Parent then tween(p, 0.32, { CFrame = endCF }, Enum.EasingStyle.Back) end
+		end)
+	end
+
+	if not sat then
+		-- ground burst where the spike breaks out
+		local ba = anchorAt(pos + Vector3.new(0, 0.4, 0), 2.5)
+		burstEmit(EM.IceDebris, ba, 1.2 + mult * 0.8, 8 + math.floor(mult * 3))
+		burstEmit(EM.Crack, ba, 0.5 + mult * 0.5, 1)
+		if mult >= 2 then
+			burstEmit(EM.GlassShard, ba, 0.6 + mult * 0.3, 3)
+			-- expanding frost ring on the ground
+			local ring = fxPart({
+				Shape = Enum.PartType.Cylinder, Material = Enum.Material.Neon, Color = ICE, Transparency = 0.3,
+				Size = Vector3.new(0.3, 2, 2),
+				CFrame = CFrame.new(pos + Vector3.new(0, 0.35, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+			})
+			tween(ring, 0.55, { Size = Vector3.new(0.3, 7 * mult, 7 * mult), Transparency = 1 })
+			Debris:AddItem(ring, 0.7)
+			-- twinkling sparkles on the spike while it stands
+			local tw = Instance.new("ParticleEmitter")
+			tw.Texture = "rbxasset://textures/particles/sparkles_main.dng"
+			tw.Rate = 6
+			tw.Lifetime = NumberRange.new(0.8, 1.4)
+			tw.Speed = NumberRange.new(1, 5)
+			tw.SpreadAngle = Vector2.new(180, 180)
+			tw.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1.1), NumberSequenceKeypoint.new(1, 0) })
+			tw.LightEmission = 1
+			tw.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(130, 215, 255))
+			tw.Parent = spike
+			-- a cluster of smaller spikes leaning out around the base
+			for _ = 1, 3 do
+				local a = rng:NextNumber(0, math.pi * 2)
+				local r = h * rng:NextNumber(0.18, 0.3)
+				iceSpike(pos + Vector3.new(math.cos(a) * r, 0, math.sin(a) * r), mult * rng:NextNumber(0.3, 0.5), true)
+			end
+		end
+		if mult >= 3 then smokePuff(pos + Vector3.new(0, 1, 0), 9 * mult, 3) end
+	end
+
+	-- shatter: glass shards / chroma glass / ice dust
+	task.delay(CFG.freezeTime + rng:NextNumber(0, 0.45), function()
+		if not alive or not spike.Parent then return end
+		local c = spike.Position
+		for _, p in ipairs(parts) do pcall(function() p:Destroy() end) end
+		local k = math.clamp(mult, 0.5, 4)
+		local a = anchorAt(c, 6.2)
+		if sat then
+			burstEmit(EM.GlassShard, a, 0.6 + k, 3)
+			return
+		end
+		burstEmit(EM.ChromaGlass, a, 0.6 + k * 0.5, 3 + math.floor(k * 1.5))
+		burstEmit(EM.GlassShard, a, 0.6 + k * 0.5, 3 + math.floor(k * 1.5))
+		burstEmit(EM.IceDebris, a, 1 + k * 0.6, 8 + math.floor(k * 3))
+		if mult >= 3 then smokePuff(c, 14 * mult, 4) end
+	end)
+end
+
+local function shards(pos)
+	local r = CFG.radius
+	task.spawn(function()
+		for _ = 1, 12 do
+			if not alive then return end
+			local a = rng:NextNumber(0, math.pi * 2)
+			local d = math.sqrt(rng:NextNumber(0, 1)) * r * 0.9
+			local ground = pos + Vector3.new(math.cos(a) * d, 0, math.sin(a) * d)
+			local len = rng:NextNumber(3, 6)
+			local s = fxPart({
+				Material = Enum.Material.Neon,
+				Color = Color3.fromRGB(200, 240, 255),
+				Transparency = 0.1,
+				Size = Vector3.new(0.7, len, 0.7),
+				CFrame = CFrame.new(ground + Vector3.new(0, 70, 0)) * CFrame.Angles(math.rad(rng:NextNumber(-12, 12)), 0, math.rad(rng:NextNumber(-12, 12))),
+			})
+			local tw = tween(s, 0.3, { CFrame = CFrame.new(ground + Vector3.new(0, len / 2, 0)) * (s.CFrame - s.CFrame.Position) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+			tw.Completed:Connect(function()
+				if rng:NextNumber() < 0.3 then iceSpike(ground) end
+				tween(s, 0.25, { Transparency = 1 })
+				Debris:AddItem(s, 0.3)
+			end)
+			task.wait(0.06)
+		end
+	end)
+end
+
+-- ===================== DELTARUNE-STYLE SNOWFLAKES =====================
+-- each flake is a billboard of three crossed bars (pixel-art snowflake), swirling down
+local flakes = {}
+
+local function buildFlakeGui(part, size)
+	local gui = Instance.new("BillboardGui")
+	gui.Size = UDim2.fromScale(size, size)
+	gui.LightInfluence = 0
+	gui.Adornee = part
+	gui.Parent = part
+	local holder = Instance.new("Frame")
+	holder.BackgroundTransparency = 1
+	holder.Size = UDim2.fromScale(1, 1)
+	holder.Parent = gui
+	local bars = {}
+	for i = 0, 2 do
+		local b = Instance.new("Frame")
+		b.AnchorPoint = Vector2.new(0.5, 0.5)
+		b.Position = UDim2.fromScale(0.5, 0.5)
+		b.Size = UDim2.fromScale(0.11, 1)
+		b.Rotation = i * 60
+		b.BackgroundColor3 = Color3.new(1, 1, 1)
+		b.BorderSizePixel = 0
+		b.Parent = holder
+		bars[#bars + 1] = b
+	end
+	local core = Instance.new("Frame")
+	core.AnchorPoint = Vector2.new(0.5, 0.5)
+	core.Position = UDim2.fromScale(0.5, 0.5)
+	core.Size = UDim2.fromScale(0.3, 0.3)
+	core.Rotation = 45
+	core.BackgroundColor3 = Color3.fromRGB(170, 235, 255)
+	core.BorderSizePixel = 0
+	core.Parent = holder
+	bars[#bars + 1] = core
+	return holder, bars, gui
+end
+
+
+local function newFlake(pos, vel, size, life, spin, sway)
+	if #flakes > 60 then return end
+	local part = fxPart({ Transparency = 1, Size = Vector3.new(0.2, 0.2, 0.2), CFrame = CFrame.new(pos) })
+	local holder, bars = buildFlakeGui(part, size)
+	flakes[#flakes + 1] = {
+		part = part, holder = holder, bars = bars, p0 = pos, vel = vel, life = life,
+		t = 0, rot = rng:NextNumber(0, 360), spin = spin, amp = sway,
+		sw = rng:NextNumber(2, 5), ph = rng:NextNumber(0, 6.28),
+	}
+end
+
+conn(RunService.Heartbeat:Connect(function(dt)
+	for i = #flakes, 1, -1 do
+		local f = flakes[i]
+		f.t += dt
+		if not alive or f.t >= f.life or not f.part.Parent then
+			pcall(function() f.part:Destroy() end)
+			table.remove(flakes, i)
+		else
+			local k = f.t
+			local sway = Vector3.new(math.sin(k * f.sw + f.ph) * f.amp, 0, math.cos(k * f.sw + f.ph) * f.amp)
+			f.part.CFrame = CFrame.new(f.p0 + f.vel * k + sway)
+			f.rot += f.spin * dt
+			f.holder.Rotation = f.rot
+			local fade = f.life - k
+			if fade < 0.3 then
+				local a = 1 - math.clamp(fade / 0.3, 0, 1)
+				for _, b in ipairs(f.bars) do b.BackgroundTransparency = a end
+			end
+		end
+	end
+end))
+
+-- snow rebuilt from the logged "Snow" emitter (rbxassetid://68072538)
+local function snowEmitter(parent, rate)
+	local e = Instance.new("ParticleEmitter")
+	e.Texture = "rbxassetid://68072538"
+	e.Rate = rate
+	e.Lifetime = NumberRange.new(5, 7)
+	e.Speed = NumberRange.new(0, 10)
+	e.Size = NumberSequence.new(1.2, 0.5)
+	e.Color = ColorSequence.new(Color3.new(1, 1, 1))
+	e.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1),
+		NumberSequenceKeypoint.new(0.2, 0),
+		NumberSequenceKeypoint.new(0.8, 0),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	e.Rotation = NumberRange.new(0, 360)
+	e.RotSpeed = NumberRange.new(-200, 200)
+	e.SpreadAngle = Vector2.new(40, 40)
+	e.Acceleration = Vector3.new(0, -2, 0)
+	e.Drag = 0
+	e.EmissionDirection = Enum.NormalId.Bottom
+	e.LightInfluence = 0
+	e.LightEmission = 0.25
+	e.Shape = Enum.ParticleEmitterShape.Box
+	e.ShapeStyle = Enum.ParticleEmitterShapeStyle.Volume
+	e.Parent = parent
+	return e
+end
+
+local function flakeRain(center, radius, dur, groundY, density)
+	local p = fxPart({
+		Transparency = 1,
+		Size = Vector3.new(radius * 2, 1, radius * 2),
+		CFrame = CFrame.new(center.X, groundY + 26, center.Z),
+	})
+	local e = snowEmitter(p, 38 * (density or 2))
+	task.delay(dur, function() e.Enabled = false end)
+	Debris:AddItem(p, dur + 8)
+end
+
+local function flakeBurst(pos, n)
+	local p = fxPart({ Transparency = 1, Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(pos) })
+	local e = snowEmitter(p, 0)
+	e.Lifetime = NumberRange.new(0.8, 1.4)
+	e.Speed = NumberRange.new(18, 48)
+	e.SpreadAngle = Vector2.new(180, 180)
+	e.Acceleration = Vector3.new(0, -30, 0)
+	e.Size = NumberSequence.new(2.6, 0.8)
+	e.EmissionDirection = Enum.NormalId.Top
+	e:Emit(n)
+	Debris:AddItem(p, 3)
+end
+
+-- ===================== NPC FREEZE + SHATTER =====================
+local frozen = {}
+local explodeFX -- assigned in the Iceshock section
+
+local function shatterBurst(cf)
+	iceDebris(cf.Position, 8)
+end
+
+-- ===================== ICE CAGE (the block that freezes NPCs and loose parts) =====================
+-- glass block + glowing frost shell + inner glow + a crown of crystal spikes + cold light + frost sparkles.
+-- returns a function: call it to shatter the cage.
+local function iceCage(bcf, bsz, lite)
+	local made = {}
+	local function add(p) made[#made + 1] = p return p end
+	local pad = Vector3.new(1.2, 1.2, 1.2)
+	local main = add(fxPart({ Material = Enum.Material.Glass, Color = Color3.fromRGB(150, 215, 255), Reflectance = 0.15, Transparency = 1, Size = bsz * 0.6 + pad * 0.6, CFrame = bcf }))
+	local frost = add(fxPart({ Material = Enum.Material.Neon, Color = Color3.fromRGB(190, 240, 255), Transparency = 1, Size = bsz * 0.6 + pad * 1.4, CFrame = bcf }))
+	local core = add(fxPart({ Material = Enum.Material.Neon, Color = Color3.fromRGB(110, 205, 255), Transparency = 1, Size = bsz * 0.6, CFrame = bcf }))
+	local function grow(part, size, transp)
+		tween(part, 0.45, { Size = size, Transparency = transp }, Enum.EasingStyle.Back)
+	end
+	grow(main, bsz + pad, 0.35)
+	grow(frost, bsz + pad * 2.2, 0.88)
+	grow(core, bsz * 0.9, 0.9)
+	if not lite then
+		pcall(function()
+			local l = Instance.new("PointLight")
+			l.Color = Color3.fromRGB(120, 210, 255)
+			l.Brightness = 2.5
+			l.Range = math.clamp(bsz.Magnitude * 1.6, 12, 30)
+			l.Parent = main
+			local e = Instance.new("ParticleEmitter") -- frost sparkles drifting off the surface
+			e.Texture = "rbxassetid://68072538"
+			e.Rate = 14
+			e.Lifetime = NumberRange.new(1, 1.8)
+			e.Speed = NumberRange.new(1, 4)
+			e.Size = NumberSequence.new(0.9, 0)
+			e.Color = ColorSequence.new(Color3.fromRGB(200, 245, 255))
+			e.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.2, 0.1), NumberSequenceKeypoint.new(1, 1) })
+			e.Rotation = NumberRange.new(0, 360)
+			e.RotSpeed = NumberRange.new(-120, 120)
+			e.SpreadAngle = Vector2.new(180, 180)
+			e.Acceleration = Vector3.new(0, 1.5, 0)
+			e.LightEmission = 0.8
+			e.LightInfluence = 0
+			e.Shape = Enum.ParticleEmitterShape.Box
+			e.ShapeStyle = Enum.ParticleEmitterShapeStyle.Surface
+			e.Parent = frost
+		end)
+	end
+	-- crystal crown: spikes break out of the ground around the block, leaning outward
+	task.spawn(function()
+		local n = lite and 4 or 8
+		local ctr = bcf.Position
+		local rad = math.max(bsz.X, bsz.Z) / 2 * 0.95
+		local gy = ctr.Y - bsz.Y / 2 + 0.2
+		for i = 1, n do
+			if not alive then return end
+			local idx = rng:NextInteger(1, #SPIKE_DEFS)
+			local tpl = getSpikeTemplate(idx)
+			if not tpl or not main.Parent then return end
+			local def = SPIKE_DEFS[idx]
+			local ang = (i / n) * math.pi * 2 + rng:NextNumber(-0.25, 0.25)
+			local out = Vector3.new(math.cos(ang), 0, -math.sin(ang))
+			local h = math.clamp(bsz.Y * rng:NextNumber(0.5, 0.95), 2.5, 16)
+			local sc = h / def.size.Y
+			local base = CFrame.new(Vector3.new(ctr.X, gy, ctr.Z) + out * rad)
+				* CFrame.Angles(0, ang, 0)
+				* CFrame.Angles(0, 0, -math.rad(rng:NextNumber(14, 34)))
+			local startCF = base * CFrame.new(0, -h * 0.55, 0) * SPIKE_ROT
+			local endCF = base * CFrame.new(0, h / 2 - h * 0.06, 0) * SPIKE_ROT
+			local sp = spikePart(tpl, def, sc, startCF, false)
+			add(sp)
+			tween(sp, 0.3, { CFrame = endCF }, Enum.EasingStyle.Back)
+			if not lite and i % 2 == 0 then
+				local halo = spikePart(tpl, def, sc, startCF, true)
+				add(halo)
+				tween(halo, 0.3, { CFrame = endCF }, Enum.EasingStyle.Back)
+			end
+			task.wait(0.03)
+		end
+	end)
+	-- a few crystals poking out of the top
+	if not lite then
+		task.spawn(function()
+			for i = 1, 3 do
+				local idx = rng:NextInteger(1, #SPIKE_DEFS)
+				local tpl = getSpikeTemplate(idx)
+				if not tpl or not main.Parent or not alive then return end
+				local def = SPIKE_DEFS[idx]
+				local h = math.clamp(bsz.Y * 0.35, 2, 8)
+				local sc = h / def.size.Y
+				local top = bcf.Position + Vector3.new(rng:NextNumber(-1, 1) * bsz.X * 0.3, bsz.Y / 2, rng:NextNumber(-1, 1) * bsz.Z * 0.3)
+				local base = CFrame.new(top) * CFrame.Angles(math.rad(rng:NextNumber(-25, 25)), rng:NextNumber(0, 6.28), math.rad(rng:NextNumber(-25, 25)))
+				local sp = spikePart(tpl, def, sc, base * CFrame.new(0, -h * 0.5, 0) * SPIKE_ROT, false)
+				add(sp)
+				tween(sp, 0.3, { CFrame = base * CFrame.new(0, h / 2 - 0.3, 0) * SPIKE_ROT }, Enum.EasingStyle.Back)
+				task.wait(0.05)
+			end
+		end)
+	end
+	pcall(flakeBurst, bcf.Position, lite and 3 or 10)
+	return function(shatter)
+		if shatter then
+			pcall(iceDebris, bcf.Position, lite and 6 or 14)
+		end
+		for _, o in ipairs(made) do
+			if o and o.Parent then
+				pcall(function() tween(o, 0.18, { Transparency = 1 }) end)
+				Debris:AddItem(o, 0.3)
+			end
+		end
+	end
+end
+
+local function freezeNPC(model, from, dur, boom)
+	if frozen[model] then return end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+	if not hum or not root or hum.Health <= 0 then return end
+	frozen[model] = true
+	simBoost()
+	pcall(function()
+		hum.WalkSpeed = 0
+		hum.JumpHeight = 0
+		hum.JumpPower = 0
+		hum.AutoRotate = false
+	end)
+	-- knockback: thrown away from the impact, then frozen where they land
+	from = from or root.Position
+	local dir = Vector3.new(root.Position.X - from.X, 0, root.Position.Z - from.Z)
+	if dir.Magnitude > 0.1 then
+		dir = dir.Unit
+	else
+		dir = Vector3.new(rng:NextNumber(-1, 1), 0, rng:NextNumber(-1, 1)).Unit
+	end
+	pcall(function()
+		root.AssemblyLinearVelocity = dir * 60 + Vector3.new(0, 40, 0)
+		hum:ChangeState(Enum.HumanoidStateType.Freefall)
+	end)
+	task.wait(0.4)
+	if not alive or not root.Parent then
+		frozen[model] = nil
+		return
+	end
+	local cf = root.CFrame
+	local block
+	pcall(function()
+		local bcf, bsz = model:GetBoundingBox()
+		block = iceCage(bcf, bsz, false)
+	end)
+	local trackT = 0
+	local hold = RunService.Heartbeat:Connect(function(dt)
+		if not root.Parent then return end
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		root.CFrame = cf
+		trackT += dt
+		if trackT >= 0.25 then
+			trackT = 0
+			pcall(function()
+				for _, t in ipairs(hum:GetPlayingAnimationTracks()) do t:AdjustSpeed(0) end
+			end)
+		end
+	end)
+	task.delay(dur or CFG.freezeTime, function()
+		hold:Disconnect()
+		if block then pcall(block, true) end
+		frozen[model] = nil
+		if not root.Parent then return end
+		if boom and explodeFX then pcall(explodeFX, root.Position) end
+		shatterBurst(root.CFrame)
+		flakeBurst(root.Position, 8)
+		if CFG.killNPCs then
+			simBoost()
+			pcall(function() hum.Health = 0 end)
+			pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
+			pcall(function() model:BreakJoints() end)
+			pcall(function()
+				for _, d in ipairs(model:GetDescendants()) do
+					if d:IsA("BasePart") then
+						d.AssemblyLinearVelocity = dir * 50 + Vector3.new(0, 34, 0)
+					end
+				end
+			end)
+		else
+			pcall(function()
+				hum.WalkSpeed = 16
+				hum.JumpHeight = 7.2
+				hum.AutoRotate = true
+			end)
+		end
+	end)
+end
+
+local function hitNPCs(pos, rad, dur, boom)
+	if not CFG.freezeNPCs then return end
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local ignore = { fxFolder }
+	if lp.Character then ignore[#ignore + 1] = lp.Character end
+	params.FilterDescendantsInstances = ignore
+	local seen = {}
+	for _, p in ipairs(workspace:GetPartBoundsInRadius(pos, rad or CFG.radius, params)) do
+		local m = p:FindFirstAncestorOfClass("Model")
+		if m and not seen[m] and m:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(m) then
+			seen[m] = true
+			task.delay(rng:NextNumber(0.2, 0.7), function()
+				if alive then freezeNPC(m, pos, dur, boom) end
+			end)
+		end
+	end
+end
+
+-- ===================== LOOSE (UNANCHORED) PARTS: freeze, then fly away =====================
+CFG.freezeLoose = true -- unanchored parts in the beam radius freeze, then get launched
+CFG.looseFreeze = 2.2 -- seconds they stay frozen before flying away
+CFG.looseFling = 130 -- sideways launch speed (away from the beam)
+CFG.looseLift = 90 -- upward launch speed
+CFG.looseMax = 120 -- max assemblies affected per cast (lag guard)
+local looseBusy = {}
+
+local function looseOK(p)
+	if not p:IsA("BasePart") or p:IsA("Terrain") or p.Anchored then return false end
+	if fxFolder and p:IsDescendantOf(fxFolder) then return false end
+	if p:GetAttribute("_Replay") then return false end
+	if lp.Character and p:IsDescendantOf(lp.Character) then return false end
+	if p.Size.Magnitude > 60 then return false end
+	local m = p:FindFirstAncestorOfClass("Model")
+	while m do
+		if m:FindFirstChildOfClass("Humanoid") or Players:GetPlayerFromCharacter(m) then return false end
+		m = m.Parent and m.Parent:FindFirstAncestorOfClass("Model")
+	end
+	return true
+end
+
+local function freezeLoose(root, from, dur, lite)
+	if looseBusy[root] or not root.Parent or root.Anchored then return end
+	looseBusy[root] = true
+	simBoost()
+	local saved, k = {}, 0
+	local okP, parts = pcall(function() return root:GetConnectedParts(true) end)
+	if not okP or type(parts) ~= "table" then parts = { root } end
+	local mn, mx
+	for _, q in ipairs(parts) do
+		if k >= 25 then break end
+		k += 1
+		saved[q] = { q.Color, q.Material }
+		pcall(function()
+			q.Material = Enum.Material.Ice
+			q.Color = ICE
+		end)
+		local r = q.Size.Magnitude / 2
+		local a, b = q.Position - Vector3.new(r, r, r), q.Position + Vector3.new(r, r, r)
+		mn = mn and Vector3.new(math.min(mn.X, a.X), math.min(mn.Y, a.Y), math.min(mn.Z, a.Z)) or a
+		mx = mx and Vector3.new(math.max(mx.X, b.X), math.max(mx.Y, b.Y), math.max(mx.Z, b.Z)) or b
+	end
+	local function restore()
+		for q, sv in pairs(saved) do
+			pcall(function()
+				if q.Parent then
+					q.Color = sv[1]
+					q.Material = sv[2]
+				end
+			end)
+		end
+	end
+	-- ice cage around it
+	local cage
+	pcall(function()
+		local size = Vector3.new(
+			math.clamp(mx.X - mn.X, 2, 30),
+			math.clamp(mx.Y - mn.Y, 2, 30),
+			math.clamp(mx.Z - mn.Z, 2, 30)
+		)
+		cage = iceCage(CFrame.new((mn + mx) / 2), size, lite or size.Magnitude < 9)
+	end)
+	local cf = root.CFrame
+	local dir = Vector3.new(root.Position.X - from.X, 0, root.Position.Z - from.Z)
+	if dir.Magnitude > 0.1 then
+		dir = dir.Unit
+	else
+		dir = Vector3.new(rng:NextNumber(-1, 1), 0, rng:NextNumber(-1, 1)).Unit
+	end
+	local released = false
+	local hold
+	local function release(fling)
+		if released then return end
+		released = true
+		if hold then hold:Disconnect() end
+		looseBusy[root] = nil
+		if cage then pcall(cage, fling) end
+		if fling and root.Parent then
+			simBoost()
+			pcall(function()
+				root.AssemblyLinearVelocity = dir * CFG.looseFling + Vector3.new(0, CFG.looseLift, 0)
+				root.AssemblyAngularVelocity = Vector3.new(rng:NextNumber(-12, 12), rng:NextNumber(-12, 12), rng:NextNumber(-12, 12))
+			end)
+			task.delay(1.5, restore) -- stays icy while it flies
+		else
+			restore()
+		end
+	end
+	hold = RunService.Heartbeat:Connect(function()
+		if not alive or not root.Parent then
+			release(false)
+			return
+		end
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		root.CFrame = cf
+	end)
+	task.delay(dur or CFG.looseFreeze, function() release(alive) end)
+end
+
+local function hitLoose(pos, rad, dur)
+	if not CFG.freezeLoose then return end
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local ignore = { fxFolder }
+	if lp.Character then ignore[#ignore + 1] = lp.Character end
+	params.FilterDescendantsInstances = ignore
+	local roots, n = {}, 0
+	for _, p in ipairs(workspace:GetPartBoundsInRadius(pos, rad or CFG.radius, params)) do
+		if looseOK(p) then
+			local r = p.AssemblyRootPart
+			if r and not r.Anchored and not looseBusy[r] and not roots[r] and n < CFG.looseMax then
+				roots[r] = true
+				n += 1
+			end
+		end
+	end
+	for r in pairs(roots) do
+		task.delay(rng:NextNumber(0.1, 0.6), function()
+			if alive then pcall(freezeLoose, r, pos, dur, n > 25) end
+		end)
+	end
+end
+
+-- ===================== HELPERS =====================
+local function playSound(id, parent, vol, looped)
+	local ok, snd = pcall(function()
+		local s = Instance.new("Sound")
+		s.SoundId = "rbxassetid://" .. tostring(id)
+		s.Volume = vol
+		s.RollOffMaxDistance = 400
+		s.Looped = looped == true
+		s.Parent = parent
+		s:Play()
+		return s
+	end)
+	if ok and snd then
+		Debris:AddItem(snd, 20)
+		return snd
+	end
+	return nil
+end
+
+local function groundPoint(p, char)
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = { char, fxFolder }
+	local r = workspace:Raycast(p + Vector3.new(0, 60, 0), Vector3.new(0, -500, 0), rp)
+	return r and r.Position or p
+end
+
+local function getArms(char)
+	local arms = {}
+	local function norm(n) return (n:lower():gsub("[%s_]", "")) end
+	for _, d in ipairs(char:GetDescendants()) do
+		if d:IsA("Motor6D") and d.Part1 and d.Part1:IsDescendantOf(char) and not d:FindFirstAncestorOfClass("Tool") then
+			local n, p = norm(d.Name), norm(d.Part1.Name)
+			if n == "rightshoulder" or p == "rightarm" or p == "rightupperarm" then
+				arms.r = arms.r or d
+			elseif n == "leftshoulder" or p == "leftarm" or p == "leftupperarm" then
+				arms.l = arms.l or d
+			end
+		end
+	end
+	if arms.r and arms.l then return arms end
+	return nil
+end
+
+-- no usable shoulder joints: cast anyway, just without the arm pose
+local function fakeArms(char, root)
+	local part = char:FindFirstChild("Head") or root
+	local function m() return { C0 = CFrame.new(), Transform = CFrame.new(), Part1 = part } end
+	return { r = m(), l = m(), fake = true }
+end
+
+local function armCF(orig, a, side)
+	local base = orig.Rotation
+	local q = CFrame.Angles(0, math.rad(PRAY.yaw) * a * side, 0) * CFrame.Angles(math.rad(PRAY.lift) * a, 0, 0)
+	return orig * (base:Inverse() * q * base)
+end
+
+local function tipPos(char, motor, side)
+	local hand = char:FindFirstChild(side == 1 and "RightHand" or "LeftHand")
+	if hand then return hand.Position end
+	return (motor.Part1.CFrame * CFrame.new(0, -1, 0)).Position
+end
+
+local function handFX(char, motor, side)
+	local hand = char:FindFirstChild(side == 1 and "RightHand" or "LeftHand")
+	local holder, offset = hand, Vector3.zero
+	if not hand then holder, offset = motor.Part1, Vector3.new(0, -1, 0) end
+	local att = Instance.new("Attachment")
+	att.Position = offset
+	att.Parent = holder
+
+	local snow = Instance.new("ParticleEmitter")
+	snow.Texture = "rbxasset://textures/particles/sparkles_main.dng"
+	snow.Rate = 0
+	snow.Lifetime = NumberRange.new(1.2, 2)
+	snow.Speed = NumberRange.new(2, 6)
+	snow.SpreadAngle = Vector2.new(35, 35)
+	snow.Acceleration = Vector3.new(0, 14, 0)
+	snow.Drag = 1
+	snow.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0) })
+	snow.LightEmission = 0.8
+	snow.Color = ColorSequence.new(Color3.new(1, 1, 1), ICE)
+	snow.Parent = att
+
+	local mist = Instance.new("ParticleEmitter")
+	mist.Texture = "rbxasset://textures/particles/smoke_main.dng"
+	mist.Rate = 0
+	mist.Lifetime = NumberRange.new(1, 1.6)
+	mist.Speed = NumberRange.new(1, 2)
+	mist.SpreadAngle = Vector2.new(60, 60)
+	mist.Acceleration = Vector3.new(0, 6, 0)
+	mist.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1.6), NumberSequenceKeypoint.new(1, 5) })
+	mist.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.75), NumberSequenceKeypoint.new(1, 1) })
+	mist.Color = ColorSequence.new(Color3.fromRGB(215, 240, 255))
+	mist.Parent = att
+
+	return att, snow, mist
+end
+
+-- a snowflake that leaves the hand and curves up to the beam start in the sky
+local function flyOrb(p0, p2, dur)
+	local orb = fxPart({ Transparency = 1, Size = Vector3.new(0.3, 0.3, 0.3), CFrame = CFrame.new(p0) })
+	local fsz = math.clamp((p2 - p0).Magnitude / 50, 1.5, 4) -- bigger flakes for longer flights so they read from far away
+	flakeBurst(p0, 3)
+	-- stream of snowflakes left behind the orb
+	local flakes = snowEmitter(orb, 45)
+	flakes.Lifetime = NumberRange.new(0.7, 1.2)
+	flakes.Speed = NumberRange.new(0, 4)
+	flakes.SpreadAngle = Vector2.new(180, 180)
+	flakes.Acceleration = Vector3.new(0, 0, 0)
+	flakes.EmissionDirection = Enum.NormalId.Top
+	flakes.Size = NumberSequence.new(fsz, fsz * 0.3)
+	flakes.LightEmission = 1
+	flakes.ZOffset = 1
+	-- one big flake that rides on the orb itself
+	local head = snowEmitter(orb, 10)
+	head.Lifetime = NumberRange.new(0.25, 0.3)
+	head.Speed = NumberRange.new(0, 0)
+	head.SpreadAngle = Vector2.new(0, 0)
+	head.Acceleration = Vector3.new(0, 0, 0)
+	head.LockedToPart = true
+	head.Size = NumberSequence.new(fsz * 1.1)
+	head.LightEmission = 1
+	head.ZOffset = 1
+	local trail = Instance.new("ParticleEmitter")
+	trail.Texture = "rbxassetid://68072538"
+	trail.Rate = 22
+	trail.Lifetime = NumberRange.new(0.35, 0.7)
+	trail.Speed = NumberRange.new(0.5, 3)
+	trail.SpreadAngle = Vector2.new(180, 180)
+	trail.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1.5), NumberSequenceKeypoint.new(1, 0) })
+	trail.LightEmission = 1
+	trail.Color = ColorSequence.new(Color3.new(1, 1, 1), ICE)
+	trail.Parent = orb
+	local p1 = p0:Lerp(p2, 0.5) + Vector3.new(rng:NextNumber(-14, 14), 25, rng:NextNumber(-14, 14))
+	task.spawn(function()
+		local t0 = os.clock()
+		while alive and orb.Parent do
+			local el = os.clock() - t0
+			local a = el / dur
+			if a >= 1 then break end
+			a = a ^ 1.4
+			orb.CFrame = CFrame.new(p0:Lerp(p1, a):Lerp(p1:Lerp(p2, a), a))
+			RunService.Heartbeat:Wait()
+		end
+		trail.Enabled = false
+		flakes.Enabled = false
+		head.Enabled = false
+		Debris:AddItem(orb, 1)
+	end)
+end
+
+-- ===================== DELTARUNE SCREEN FX =====================
+local function dimWorld()
+	local cc = Instance.new("ColorCorrectionEffect")
+	cc.Name = "SnowgraveDim"
+	cc.Parent = Lighting
+	tween(cc, 1.2, {
+		Brightness = -0.26,
+		Contrast = 0.12,
+		Saturation = -0.1,
+		TintColor = Color3.fromRGB(222, 232, 247),
+	})
+	return cc
+end
+
+local function undimWorld(cc)
+	if not cc then return end
+	pcall(function()
+		tween(cc, 0.9, { Brightness = 0, Contrast = 0, Saturation = 0, TintColor = Color3.new(1, 1, 1) })
+	end)
+	Debris:AddItem(cc, 1.1)
+end
+
+local function titleCard()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "SnowgraveTitle"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	local okH, hui = pcall(function() return gethui() end)
+	gui.Parent = (okH and hui) or lp:WaitForChild("PlayerGui")
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.AnchorPoint = Vector2.new(0.5, 0.5)
+	l.Position = UDim2.fromScale(0.5, 0.18)
+	l.Size = UDim2.fromScale(0.5, 0.09)
+	l.Font = Enum.Font.Arcade
+	l.Text = "SNOWGRAVE"
+	l.TextScaled = true
+	l.TextColor3 = Color3.fromRGB(205, 248, 255)
+	l.TextStrokeColor3 = Color3.fromRGB(30, 120, 210)
+	l.TextStrokeTransparency = 0
+	l.TextTransparency = 1
+	l.Parent = gui
+	tween(l, 0.25, { TextTransparency = 0 })
+	task.delay(2.3, function()
+		if l.Parent then tween(l, 0.6, { TextTransparency = 1, TextStrokeTransparency = 1 }) end
+	end)
+	Debris:AddItem(gui, 3.4)
+end
+
+local function guiParent()
+	local okH, hui = pcall(function() return gethui() end)
+	return (okH and hui) or lp:WaitForChild("PlayerGui")
+end
+
+local function newScreenGui(name, order)
+	local g = Instance.new("ScreenGui")
+	g.Name = name
+	g.ResetOnSpawn = false
+	g.IgnoreGuiInset = true
+	g.DisplayOrder = order
+	g.Parent = guiParent()
+	return g
+end
+
+-- pixel snowflakes sliding down the screen (cheap: one tween per flake, no per-frame code)
+local function screenSnow(dur, count)
+	local gui = newScreenGui("SnowgraveScreenSnow", 5)
+	local t0 = os.clock()
+	local function launch(f)
+		if not alive or not gui.Parent or os.clock() - t0 > dur then
+			f:Destroy()
+			return
+		end
+		local px = rng:NextNumber(0.02, 0.98)
+		local sz = rng:NextNumber(28, 70)
+		local rot = rng:NextNumber(0, 60)
+		f.Size = UDim2.fromOffset(sz, sz)
+		f.Position = UDim2.fromScale(px, -0.08)
+		f.Rotation = rot
+		local tw = TweenService:Create(f, TweenInfo.new(rng:NextNumber(1.6, 3), Enum.EasingStyle.Linear), {
+			Position = UDim2.fromScale(px + rng:NextNumber(-0.08, 0.08), 1.1),
+			Rotation = rot + rng:NextNumber(-180, 180),
+		})
+		tw.Completed:Once(function() launch(f) end)
+		tw:Play()
+	end
+	for i = 1, count do
+		local f = Instance.new("ImageLabel")
+		f.BackgroundTransparency = 1
+		f.Image = "rbxassetid://68072538"
+		f.AnchorPoint = Vector2.new(0.5, 0.5)
+		f.ImageTransparency = 0.05
+		f.Parent = gui
+		task.delay(rng:NextNumber(0, 1.6), function() launch(f) end)
+	end
+	Debris:AddItem(gui, dur + 4)
+end
+
+local function screenFlash(dur)
+	local gui = newScreenGui("SnowgraveFlash", 10)
+	local f = Instance.new("Frame")
+	f.Size = UDim2.fromScale(1, 1)
+	f.BackgroundColor3 = Color3.new(1, 1, 1)
+	f.BackgroundTransparency = 0.1
+	f.BorderSizePixel = 0
+	f.Parent = gui
+	tween(f, dur, { BackgroundTransparency = 1 })
+	Debris:AddItem(gui, dur + 0.3)
+end
+
+-- ===================== BIG-VFX HELPERS =====================
+-- ring of fast particles shooting outward on the horizontal plane (shockwave / wind ring)
+local function particleRing(pos, count, speed, size)
+	count = math.max(6, math.floor(count * 0.6))
+	for i = 1, count do
+		local a = (i / count) * math.pi * 2
+		local dir = Vector3.new(math.cos(a), 0, math.sin(a))
+		local p = fxPart({
+			Transparency = 1,
+			Size = Vector3.new(0.5, 0.5, 0.5),
+			CFrame = CFrame.lookAt(pos + dir * 2, pos + dir * 3),
+		})
+		local e = Instance.new("ParticleEmitter")
+		e.Texture = "rbxasset://textures/particles/sparkles_main.dng"
+		e.Rate = 0
+		e.Lifetime = NumberRange.new(0.5, 0.85)
+		e.Speed = NumberRange.new(speed, speed * 1.2)
+		e.EmissionDirection = Enum.NormalId.Front
+		e.SpreadAngle = Vector2.new(3, 3)
+		e.Drag = 3
+		e.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, size), NumberSequenceKeypoint.new(1, 0) })
+		e.LightEmission = 1
+		e.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(140, 228, 255))
+		e.Parent = p
+		e:Emit(3)
+		Debris:AddItem(p, 1.6)
+	end
+end
+
+-- a glowing ribbon that spirals down the column
+local function spiralStreak(top, H, dur)
+	local r = rng:NextNumber(7, 15)
+	local th = rng:NextNumber(0, math.pi * 2)
+	local dir = rng:NextNumber() < 0.5 and 1 or -1
+	local part = fxPart({
+		Transparency = 1,
+		Size = Vector3.new(0.2, 0.2, 0.2),
+		CFrame = CFrame.new(top + Vector3.new(math.cos(th) * r, 0, math.sin(th) * r)),
+	})
+	local a0 = Instance.new("Attachment")
+	a0.Position = Vector3.new(0, 3.8, 0)
+	a0.Parent = part
+	local a1 = Instance.new("Attachment")
+	a1.Position = Vector3.new(0, -3.8, 0)
+	a1.Parent = part
+	local tr = Instance.new("Trail")
+	tr.Attachment0, tr.Attachment1 = a0, a1
+	tr.Lifetime = 0.45
+	tr.MinLength = 0.05
+	tr.FaceCamera = true
+	tr.LightEmission = 1
+	tr.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(110, 215, 255))
+	tr.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.05), NumberSequenceKeypoint.new(1, 1) })
+	tr.WidthScale = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0.1) })
+	tr.Parent = part
+	task.spawn(function()
+		local t0 = os.clock()
+		while alive and part.Parent do
+			local a = (os.clock() - t0) / dur
+			if a >= 1 then break end
+			local ang = th + dir * (os.clock() - t0) * 16
+			part.CFrame = CFrame.new(top + Vector3.new(math.cos(ang) * r, -H * (a ^ 1.2), math.sin(ang) * r))
+			RunService.Heartbeat:Wait()
+		end
+		Debris:AddItem(part, 0.6)
+	end)
+end
+
+-- crown of mesh ice spikes bursting out around the impact point, with ground cracks
+local function iceCrown(pos)
+	local ca = anchorAt(pos + Vector3.new(0, 0.4, 0), 4)
+	burstEmit(EM.Crack, ca, 2.4, 1)
+	burstEmit(EM.Crack, ca, 4.2, 1)
+	iceSpike(pos, 4.2)
+	for i = 1, 4 do
+		local a = (i / 4) * math.pi * 2
+		iceSpike(pos + Vector3.new(math.cos(a) * 5, 0, math.sin(a) * 5), 2.4)
+	end
+	local rings = { { 10, 7, 2.0 }, { 19, 10, 1.6 }, { 28, 12, 1.3 } }
+	for ri, def in ipairs(rings) do
+		task.delay((ri - 1) * 0.08, function()
+			if not alive then return end
+			for i = 1, def[2] do
+				local a = (i / def[2]) * math.pi * 2 + rng:NextNumber(-0.1, 0.1)
+				iceSpike(pos + Vector3.new(math.cos(a) * def[1], 0, math.sin(a) * def[1]), def[3])
+			end
+		end)
+	end
+end
+
+local function bloomPulse(dur, peak, rise)
+	local b = Instance.new("BloomEffect")
+	b.Intensity = 0
+	b.Size = 40
+	b.Threshold = 0.85
+	b.Parent = Lighting
+	tween(b, 0.08, { Intensity = peak or 1.6 })
+	task.delay(0.1, function()
+		if b.Parent then tween(b, dur, { Intensity = 0 }) end
+	end)
+	Debris:AddItem(b, dur + 0.5)
+end
+
+local function fovPunch(delta, dur)
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	local base = cam.FieldOfView
+	tween(cam, 0.08, { FieldOfView = base + delta })
+	task.delay(0.1, function()
+		if cam.Parent then tween(cam, dur, { FieldOfView = base }) end
+	end)
+end
+
+-- ===================== ICESHOCK (deltarune single-target ice spell) =====================
+local function buildIceTool()
+	local function set(o, k, v) pcall(function() o[k] = v end) end
+	local tool = Instance.new("Tool")
+	tool.Name = "Iceshock"
+	tool.CanBeDropped = false
+	tool.RequiresHandle = true
+	tool.ToolTip = "Iceshock"
+	set(tool, "GripPos", Vector3.new(0, 0, -1.5))
+	set(tool, "GripForward", Vector3.new(-1, 0, 0))
+	set(tool, "GripRight", Vector3.new(0, 1, 0))
+	set(tool, "GripUp", Vector3.new(0, 0, 1))
+	local h = Instance.new("Part")
+	h.Name = "Handle"
+	h.Size = Vector3.new(1, 0.8, 4)
+	h.Color = Color3.fromRGB(106, 57, 9)
+	h.Material = Enum.Material.Plastic
+	h.Reflectance = 0.4
+	h.CanCollide = false
+	h.CanTouch = false
+	h.Massless = true
+	h.Parent = tool
+	local mesh = Instance.new("SpecialMesh")
+	mesh.Name = "Mesh"
+	mesh.MeshType = Enum.MeshType.FileMesh
+	mesh.MeshId = "rbxassetid://927048928"
+	mesh.TextureId = "rbxassetid://4151093917"
+	mesh.Scale = Vector3.new(0.1, 0.1, 0.1)
+	set(mesh, "VertexColor", Vector3.new(1.25, 0.95, 0.7))
+	mesh.Parent = h
+	return tool
+end
+
+local iceTemplate = buildIceTool()
+iceTemplate:SetAttribute("IceshockTool", true)
+
+local function iceShockFX(pos)
+	local up90 = CFrame.Angles(0, 0, math.rad(90))
+	local H = 130
+
+	-- pixel snowflake pops open at the target (deltarune iceshock sprite)
+	local sp = fxPart({ Transparency = 1, Size = Vector3.new(0.2, 0.2, 0.2), CFrame = CFrame.new(pos + Vector3.new(0, 5, 0)) })
+	local holder, bars, gui = buildFlakeGui(sp, 3)
+	tween(gui, 0.3, { Size = UDim2.fromScale(17, 17) }, Enum.EasingStyle.Back)
+	tween(holder, 0.7, { Rotation = 120 })
+	task.delay(0.35, function()
+		for _, b in ipairs(bars) do
+			if b.Parent then tween(b, 0.35, { BackgroundTransparency = 1 }) end
+		end
+	end)
+	Debris:AddItem(sp, 1)
+
+	-- the shock: thin white bolt + soft cyan shell slam down onto the target
+	local core = fxPart({
+		Shape = Enum.PartType.Cylinder, Material = Enum.Material.Neon, Color = Color3.new(1, 1, 1),
+		Transparency = 0, Size = Vector3.new(0.1, 0.1, 0.1), CFrame = CFrame.new(pos + Vector3.new(0, H, 0)) * up90,
+	})
+	local shell = fxPart({
+		Shape = Enum.PartType.Cylinder, Material = Enum.Material.Neon, Color = Color3.fromRGB(150, 220, 255),
+		Transparency = 0.55, Size = Vector3.new(0.1, 0.1, 0.1), CFrame = CFrame.new(pos + Vector3.new(0, H, 0)) * up90,
+	})
+	local mid = CFrame.new(pos + Vector3.new(0, H / 2, 0)) * up90
+	tween(core, 0.1, { Size = Vector3.new(H, 5, 5), CFrame = mid }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	tween(shell, 0.1, { Size = Vector3.new(H, 14, 14), CFrame = mid }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	task.delay(0.2, function()
+		tween(core, 0.3, { Size = Vector3.new(H, 0.2, 0.2), Transparency = 1 })
+		tween(shell, 0.35, { Size = Vector3.new(H, 1, 1), Transparency = 1 })
+	end)
+	Debris:AddItem(core, 0.7)
+	Debris:AddItem(shell, 0.7)
+
+	-- ground ring + light flash
+	local ring = fxPart({
+		Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.4, 2, 2),
+		CFrame = CFrame.new(pos + Vector3.new(0, 0.3, 0)) * up90,
+		Material = Enum.Material.Neon, Color = ICE, Transparency = 0.2,
+	})
+	tween(ring, 0.5, { Size = Vector3.new(0.4, 26, 26), Transparency = 1 })
+	Debris:AddItem(ring, 0.7)
+	local fl = fxPart({ Transparency = 1, Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(pos + Vector3.new(0, 5, 0)) })
+	local pl = Instance.new("PointLight")
+	pl.Color = Color3.fromRGB(190, 235, 255)
+	pl.Range = 40
+	pl.Brightness = 6
+	pl.Parent = fl
+	tween(pl, 1, { Brightness = 0 })
+	Debris:AddItem(fl, 1.2)
+
+	-- snowgrave emitters (aura, flash, star, hit) as one-shot bursts, no spikes
+	local bp = fxPart({ Transparency = 1, Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(pos + Vector3.new(0, 2, 0)) })
+	local function one(spec, scale, n)
+		local e = buildEmitter(spec, bp, scale)
+		e.Rate = 0
+		pcall(function() e:Emit(n) end)
+	end
+	for copy = 1, 2 do
+		local k = 1 + (copy - 1) * 0.25
+		one(EM.Star12, 5.5 * k, 3)
+		one(EM.Flash, 7 * k, 2)
+		one(EM.Flash2, 8 * k, 2)
+		one(EM.Hit, 1.3 * k, 2)
+		one(EM.HitBase, 1.3 * k, 2)
+		one(EM.Aura1, 7 * k, 14)
+		one(EM.Aura2, 7 * k, 10)
+		one(EM.Dust, 4 * k, 8)
+	end
+	Debris:AddItem(bp, 2)
+	flakeRain(pos, 14, 2.5, pos.Y, 3)
+	particleRing(pos + Vector3.new(0, 0.6, 0), 14, 85, 16)
+	iceDebris(pos, 8)
+	flakeBurst(pos + Vector3.new(0, 3, 0), 18)
+	bloomPulse(0.4, 1.1)
+	screenFlash(0.3)
+	shakeCamera(0.7, 0.4)
+end
+
+explodeFX = function(pos)
+	local bp = fxPart({ Transparency = 1, Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(pos) })
+	local function one(spec, scale, n)
+		local e = buildEmitter(spec, bp, scale)
+		e.Rate = 0
+		pcall(function() e:Emit(n) end)
+	end
+	for copy = 1, 2 do
+		local k = 1 + (copy - 1) * 0.25
+		one(EM.Star12, 4.5 * k, 2)
+		one(EM.Flash2, 6 * k, 2)
+		one(EM.Hit, 1 * k, 1)
+		one(EM.Aura1, 5.5 * k, 10)
+		one(EM.Aura2, 5.5 * k, 6)
+		one(EM.Dust, 3 * k, 6)
+	end
+	Debris:AddItem(bp, 2)
+	particleRing(pos, 10, 70, 12)
+	iceDebris(pos, 6)
+	shakeCamera(0.5, 0.3)
+end
+
+-- the Iceshock spell: an ice ball wrapped in snowflakes flies to where you clicked
+local function iceBall(char, arms, target)
+	local root = char:FindFirstChild("HumanoidRootPart")
+	local from = arms and tipPos(char, arms.r, 1) or (root.Position + Vector3.new(0, 2, 0))
+	local to = target + Vector3.new(0, 3, 0)
+	local dist = (to - from).Magnitude
+	local dur = math.clamp(dist / 110, 0.4, 1.4)
+
+	-- lightning-style path: random zig-zag waypoints that always end exactly on the target
+	local N = math.clamp(math.floor(dist / 7), 8, 22)
+	local amp = math.clamp(dist * 0.07, 2.5, 8)
+	local dir = dist > 0.01 and (to - from) / dist or Vector3.zAxis
+	local side = dir:Cross(Vector3.yAxis)
+	side = side.Magnitude > 0.1 and side.Unit or Vector3.xAxis
+	local up = side:Cross(dir).Unit
+	local way = { from }
+	for i = 1, N - 1 do
+		local f = i / N
+		local taper = math.sin(f * math.pi) ^ 0.6
+		local off = (side * rng:NextNumber(-1, 1) + up * rng:NextNumber(-1, 1)) * amp * taper
+		way[#way + 1] = from:Lerp(to, f) + off
+	end
+	way[#way + 1] = to
+
+	local ball = fxPart({
+		Shape = Enum.PartType.Ball, Material = Enum.Material.Neon, Color = Color3.fromRGB(205, 245, 255),
+		Transparency = 0.1, Size = Vector3.new(0.3, 0.3, 0.3), CFrame = CFrame.new(from),
+	})
+	local shell = fxPart({
+		Shape = Enum.PartType.Ball, Material = Enum.Material.Ice, Color = ICE,
+		Transparency = 0.5, Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(from),
+	})
+	tween(ball, 0.2, { Size = Vector3.new(1.1, 1.1, 1.1) }, Enum.EasingStyle.Back)
+	tween(shell, 0.2, { Size = Vector3.new(1.8, 1.8, 1.8) }, Enum.EasingStyle.Back)
+
+	local light = Instance.new("PointLight")
+	light.Color = Color3.fromRGB(170, 230, 255)
+	light.Range = 14
+	light.Brightness = 2
+	light.Parent = ball
+
+	local a0 = Instance.new("Attachment")
+	a0.Position = Vector3.new(0, 0.6, 0)
+	a0.Parent = ball
+	local a1 = Instance.new("Attachment")
+	a1.Position = Vector3.new(0, -0.6, 0)
+	a1.Parent = ball
+	local tr = Instance.new("Trail")
+	tr.Attachment0, tr.Attachment1 = a0, a1
+	tr.Lifetime = 0.35
+	tr.FaceCamera = true
+	tr.LightEmission = 1
+	tr.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(110, 215, 255))
+	tr.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) })
+	tr.WidthScale = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0.1) })
+	tr.Parent = ball
+
+	local spark = Instance.new("ParticleEmitter")
+	spark.Texture = "rbxasset://textures/particles/sparkles_main.dng"
+	spark.Rate = 22
+	spark.Lifetime = NumberRange.new(0.5, 0.9)
+	spark.Speed = NumberRange.new(1, 4)
+	spark.SpreadAngle = Vector2.new(180, 180)
+	spark.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.5), NumberSequenceKeypoint.new(1, 0) })
+	spark.LightEmission = 1
+	spark.Color = ColorSequence.new(Color3.new(1, 1, 1), ICE)
+	spark.Parent = ball
+	local snow = snowEmitter(ball, 14)
+	snow.Lifetime = NumberRange.new(0.8, 1.4)
+	snow.Speed = NumberRange.new(2, 6)
+	snow.SpreadAngle = Vector2.new(180, 180)
+	snow.Acceleration = Vector3.new(0, 0, 0)
+	snow.EmissionDirection = Enum.NormalId.Top
+	snow.Size = NumberSequence.new(0.7, 0.2)
+
+	-- pixel snowflakes orbiting the ball
+	local orbit = {}
+	for i = 1, 4 do
+		local fp = fxPart({ Transparency = 1, Size = Vector3.new(0.2, 0.2, 0.2), CFrame = CFrame.new(from) })
+		local holder = buildFlakeGui(fp, rng:NextNumber(0.9, 1.3))
+		orbit[i] = { part = fp, holder = holder, ph = (i / 4) * math.pi * 2, spin = rng:NextNumber(-300, 300) }
+	end
+
+	local t0 = os.clock()
+	local pos = from
+	while alive do
+		local el = os.clock() - t0
+		local a = math.clamp(el / dur, 0, 1)
+		local seg = a * N
+		local si = math.min(math.floor(seg), N - 1)
+		pos = way[si + 1]:Lerp(way[si + 2], seg - si)
+		if a < 1 then pos += Vector3.new(rng:NextNumber(-0.3, 0.3), rng:NextNumber(-0.3, 0.3), rng:NextNumber(-0.3, 0.3)) end
+		ball.CFrame = CFrame.new(pos)
+		shell.CFrame = CFrame.new(pos) * CFrame.Angles(el * 3, el * 2, 0)
+		for _, o in ipairs(orbit) do
+			local ang = o.ph + el * 8
+			o.part.CFrame = CFrame.new(pos + Vector3.new(math.cos(ang) * 1.6, math.sin(el * 5 + o.ph) * 0.5, math.sin(ang) * 1.6))
+			o.holder.Rotation = el * o.spin
+		end
+		if a >= 1 then break end
+		RunService.Heartbeat:Wait()
+	end
+
+	tr.Enabled = false
+	spark.Enabled = false
+	snow.Enabled = false
+	for _, o in ipairs(orbit) do pcall(function() o.part:Destroy() end) end
+	pcall(function()
+		tween(ball, 0.3, { Transparency = 1 })
+		tween(shell, 0.3, { Transparency = 1 })
+		tween(light, 0.3, { Brightness = 0 })
+	end)
+	Debris:AddItem(ball, 0.8)
+	Debris:AddItem(shell, 0.8)
+	return pos
+end
+
+local iceBusy, iceLast = false, 0
+
+local function castIce(tool)
+	if iceBusy or os.clock() - iceLast < 1.4 then return end
+	local char = lp.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not root or not hum or hum.Health <= 0 then return end
+	iceBusy = true
+	task.spawn(function()
+		local arms = getArms(char)
+		local orig = arms and arms.r.C0
+		local bind = "IceshockPose" .. tostring(os.clock())
+		local ok, err = pcall(function()
+			local mouse = lp:GetMouse()
+			mouse.TargetFilter = char
+			local target = mouse.Hit.Position
+			local off = target - root.Position
+			if off.Magnitude > CFG.maxRange then target = root.Position + off.Unit * CFG.maxRange end
+			target = groundPoint(target, char)
+
+			-- lock on to the nearest NPC around the aim point
+			local params = OverlapParams.new()
+			params.FilterType = Enum.RaycastFilterType.Exclude
+			params.FilterDescendantsInstances = { char, fxFolder }
+			local best, bd = nil, 18
+			for _, part in ipairs(workspace:GetPartBoundsInRadius(target, 18, params)) do
+				local m = part:FindFirstAncestorOfClass("Model")
+				local r = m and m:FindFirstChild("HumanoidRootPart")
+				if r and m:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(m) then
+					local d = (r.Position - target).Magnitude
+					if d < bd then best, bd = r, d end
+				end
+			end
+			if best then target = groundPoint(best.Position, char) end
+
+			if arms then
+				local t0 = os.clock()
+				RunService:BindToRenderStep(bind, Enum.RenderPriority.Last.Value, function()
+					local k = math.clamp((os.clock() - t0) / 0.9, 0, 1)
+					arms.r.C0 = armCF(orig, math.sin(k * math.pi) * 0.85, 1)
+					arms.r.Transform = CFrame.new()
+				end)
+				flakeBurst(tipPos(char, arms.r, 1), 6)
+			end
+			task.wait(0.3)
+			if not alive or hum.Health <= 0 then return end
+
+			iceBall(char, arms, target) -- the ball flies to the click spot first
+			if not alive then return end
+			playSound(CFG.soundIce, SoundService, 2.5)
+			iceShockFX(target)
+			hitNPCs(target, 14, 3.5, true)
+			task.wait(0.55)
+		end)
+		pcall(function() RunService:UnbindFromRenderStep(bind) end)
+		if arms then
+			pcall(function()
+				arms.r.C0 = orig
+				arms.r.Transform = CFrame.new()
+			end)
+		end
+		if not ok then report("iceshock error", err) end
+		iceBusy = false
+		iceLast = os.clock()
+	end)
+end
+
+local function giveTool(tpl, handler)
+	if not alive then return end
+	local backpack = lp:FindFirstChildOfClass("Backpack") or lp:WaitForChild("Backpack", 10)
+	if not backpack then return end
+	local char = lp.Character
+	if backpack:FindFirstChild(tpl.Name) or (char and char:FindFirstChild(tpl.Name)) then return end
+	local t = tpl:Clone()
+	t.Activated:Connect(function() handler(t) end)
+	t.Parent = backpack
+end
+
+local function give()
+	giveTool(iceTemplate, castIce)
+end
+
+give()
+conn(lp.CharacterAdded:Connect(function(char)
+	char:WaitForChild("Humanoid", 10)
+	task.wait(1)
+	give()
+end))
+
+env.__IceshockStop = function()
+	alive = false
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	for _, holder in ipairs({ lp:FindFirstChildOfClass("Backpack"), lp.Character }) do
+		if holder then
+			for _, d in ipairs(holder:GetChildren()) do
+				if d:IsA("Tool") and d:GetAttribute("IceshockTool") then pcall(function() d:Destroy() end) end
+			end
+		end
+	end
+	pcall(function() fxFolder:Destroy() end)
+	pcall(function() iceTemplate:Destroy() end)
+	env.__IceshockStop = nil
+end
