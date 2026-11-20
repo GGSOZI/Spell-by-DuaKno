@@ -1,4 +1,5 @@
 --// SPELLS HUB // powers + weapons // by DuaKNo
+--// v2: ability emblems, per-ability accent, owner editor (rename + set ability) with live npoint sync
 --// client side executor gui. save as "repo_hub.lua" in the repo root, the scan skips it
 --// scans your github repo, sorts every script into POWERS or WEAPONS, preview + activate/equip
 --// running a new one removes the previous one's tools, guis, threads and connections (toggle in settings)
@@ -34,6 +35,11 @@ local CONFIG = {
 
 	Credit = { UserName = "DuaKNo", Instagram = "me_duakno", Discord = "discord.gg/empgqd5qpq" },
 
+	-- only this account can rename scripts / set abilities (name AND real user id are checked)
+	OwnerNames = { "DuaKNo" },
+	-- edits are saved to this npoint bin and every player pulls them. make a bin at npoint.io with {} and paste its id
+	Npoint = { BinId = "", PollSeconds = 15 },
+
 	-- folders decide the section first: Repo/Weapons/x.lua -> WEAPONS
 	WeaponFolders = { weapon = true, weapons = true, guns = true, arms = true, arsenal = true },
 	PowerFolders = { power = true, powers = true, moves = true, abilities = true, spells = true },
@@ -46,14 +52,38 @@ local CONFIG = {
 	},
 
 	Categories = {
-		{ name = "Ice", color = Color3.fromRGB(120, 205, 255), words = { "snow", "ice", "frost", "freez", "glacier" } },
-		{ name = "Fire", color = Color3.fromRGB(255, 122, 66), words = { "fire", "flame", "burn", "ember", "inferno", "magma" } },
+		{ name = "Ice", color = Color3.fromRGB(120, 205, 255), words = { "snow", "ice", "frost", "freez", "glacier", "blizzard" } },
+		{ name = "Fire", color = Color3.fromRGB(255, 122, 66), words = { "fire", "flame", "burn", "ember", "inferno", "blaze" } },
 		{ name = "Storm", color = Color3.fromRGB(255, 218, 92), words = { "thunder", "lightning", "shock", "volt", "storm" } },
+		{ name = "Wind", color = Color3.fromRGB(170, 235, 220), words = { "wind", "tornado", "gust", "cyclone", "hurricane" } },
+		{ name = "Water", color = Color3.fromRGB(84, 160, 255), words = { "water", "wave", "tide", "aqua", "ocean", "flood", "tsunami" } },
+		{ name = "Earth", color = Color3.fromRGB(186, 146, 100), words = { "earth", "rock", "stone", "quake", "boulder", "terra", "mud" } },
+		{ name = "Nature", color = Color3.fromRGB(112, 214, 98), words = { "plant", "vine", "leaf", "forest", "nature", "flower", "root" } },
+		{ name = "Light", color = Color3.fromRGB(255, 244, 170), words = { "light", "holy", "radiant", "divine", "heaven", "sun" } },
+		{ name = "Dark", color = Color3.fromRGB(150, 110, 215), words = { "dark", "shadow", "night", "umbra", "abyss" } },
+		{ name = "Void", color = Color3.fromRGB(110, 90, 175), words = { "void", "blackhole", "hollow", "null" } },
+		{ name = "Blood", color = Color3.fromRGB(205, 40, 70), words = { "blood", "crimson", "vampire", "bleed" } },
+		{ name = "Poison", color = Color3.fromRGB(150, 220, 70), words = { "poison", "toxic", "venom", "acid" } },
+		{ name = "Gravity", color = Color3.fromRGB(150, 130, 255), words = { "gravity", "graviton", "crush", "pull" } },
+		{ name = "Time", color = Color3.fromRGB(240, 200, 120), words = { "time", "clock", "chrono", "rewind" } },
+		{ name = "Space", color = Color3.fromRGB(110, 140, 255), words = { "space", "galaxy", "cosmic", "meteor", "comet", "star" } },
+		{ name = "Psychic", color = Color3.fromRGB(255, 130, 220), words = { "psychic", "mind", "telekin", "mental", "illusion" } },
+		{ name = "Sound", color = Color3.fromRGB(255, 170, 120), words = { "sound", "sonic", "echo", "scream", "music" } },
+		{ name = "Metal", color = Color3.fromRGB(190, 200, 215), words = { "metal", "steel", "iron", "chrome" } },
+		{ name = "Magma", color = Color3.fromRGB(255, 90, 40), words = { "lava", "magma", "volcano" } },
+		{ name = "Sand", color = Color3.fromRGB(225, 195, 130), words = { "sand", "dune", "desert" } },
+		{ name = "Magic", color = Color3.fromRGB(200, 120, 255), words = { "magic", "arcane", "spell", "wizard", "rune", "mage" } },
+		{ name = "Curse", color = Color3.fromRGB(176, 60, 125), words = { "curse", "hex", "malevolent" } },
+		{ name = "Spirit", color = Color3.fromRGB(150, 230, 230), words = { "spirit", "ghost", "soul", "phantom" } },
+		{ name = "Energy", color = Color3.fromRGB(120, 255, 240), words = { "energy", "beam", "laser", "plasma", "aura", "blast" } },
+		{ name = "Explosion", color = Color3.fromRGB(255, 160, 60), words = { "explosion", "bomb", "boom", "nuke", "explode" } },
+		{ name = "Healing", color = Color3.fromRGB(130, 255, 170), words = { "heal", "regen", "restore", "cure" } },
 		{ name = "Movement", color = Color3.fromRGB(112, 232, 176), words = { "parkour", "dash", "fly", "speed", "wall", "teleport", "glide" } },
 		{ name = "Summon", color = Color3.fromRGB(194, 138, 255), words = { "pet", "guard", "summon", "dog", "cat", "army", "npc" } },
 		{ name = "Combat", color = Color3.fromRGB(255, 102, 124), words = { "moveset", "combo", "fight", "punch", "domain" } },
 		{ name = "Blade", color = Color3.fromRGB(206, 214, 232), words = { "sword", "katana", "blade", "saber", "scythe", "axe", "knife", "dagger", "spear" } },
 		{ name = "Ranged", color = Color3.fromRGB(255, 184, 84), words = { "gun", "rifle", "pistol", "shotgun", "sniper", "launcher", "cannon", "bow" } },
+		{ name = "Blunt", color = Color3.fromRGB(190, 170, 150), words = { "hammer", "mace", "club", "staff" } },
 	},
 	GeneralColor = Color3.fromRGB(150, 160, 184),
 
@@ -236,6 +266,124 @@ function Net.source(entry)
 	return body
 end
 
+--// ============================== sync (npoint) + owner ==============================
+--// DuaKNo edits names / abilities -> saved to an npoint bin -> every player running the hub pulls it on a timer
+
+local Sync = { overrides = {}, last = nil, status = "local only", holdUntil = 0 }
+local Owner = { ok = false }
+
+function Sync.url()
+	local id = CONFIG.Npoint and CONFIG.Npoint.BinId
+	if type(id) == "string" and id ~= "" then
+		return "https://api.npoint.io/" .. id
+	end
+	return nil
+end
+
+function Sync.apply(items)
+	local clean = {}
+	if type(items) == "table" then
+		for key, ov in pairs(items) do
+			if type(key) == "string" and type(ov) == "table" then
+				local entry = {}
+				if type(ov.name) == "string" and ov.name ~= "" then
+					entry.name = string.sub(ov.name, 1, 40)
+				end
+				if type(ov.category) == "string" and ov.category ~= "" then
+					entry.category = string.sub(ov.category, 1, 20)
+				end
+				if ov.kind == "Powers" or ov.kind == "Weapons" then
+					entry.kind = ov.kind
+				end
+				if next(entry) then
+					clean[string.lower(key)] = entry
+				end
+			end
+		end
+	end
+	Sync.overrides = clean
+end
+
+-- returns true when the data changed
+function Sync.pull()
+	local url = Sync.url()
+	if not url then
+		Sync.status = "no npoint bin id set"
+		return false
+	end
+	if os.clock() < Sync.holdUntil then
+		return false
+	end
+	local body = Net.get(url, false)
+	if not body then
+		Sync.status = "sync offline"
+		return false
+	end
+	if body == Sync.last then
+		Sync.status = "synced"
+		return false
+	end
+	local ok, data = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+	if not ok or type(data) ~= "table" then
+		Sync.status = "bad sync data"
+		return false
+	end
+	Sync.last = body
+	Sync.apply(data.items)
+	Sync.status = "synced"
+	return true
+end
+
+function Sync.push()
+	if not Owner.ok then
+		return false, "owner only"
+	end
+	local url = Sync.url()
+	if not url then
+		Sync.status = "edit kept locally (no bin id)"
+		return false, "set CONFIG.Npoint.BinId so edits reach other players"
+	end
+	if not httpRequest then
+		return false, "this executor has no request()"
+	end
+	local body = HttpService:JSONEncode({ v = 1, updated = os.time(), items = Sync.overrides })
+	Sync.holdUntil = os.clock() + 4
+	local ok, res = pcall(httpRequest, {
+		Url = url,
+		Method = "POST",
+		Headers = { ["Content-Type"] = "application/json" },
+		Body = body,
+	})
+	local code = ok and type(res) == "table" and res.StatusCode or nil
+	if code and code >= 200 and code < 300 then
+		Sync.last = body
+		Sync.status = "synced"
+		return true
+	end
+	Sync.status = "sync failed"
+	return false, "npoint rejected the save (" .. tostring(code or "no response") .. ")"
+end
+
+-- name must match AND the real account behind that name must be this player
+function Owner.verify()
+	local lp = Players.LocalPlayer
+	local matched
+	for _, n in ipairs(CONFIG.OwnerNames) do
+		if string.lower(lp.Name) == string.lower(n) then
+			matched = n
+		end
+	end
+	if not matched then
+		return false
+	end
+	local ok, id = pcall(function()
+		return Players:GetUserIdFromNameAsync(matched)
+	end)
+	return ok and id == lp.UserId
+end
+
 --// ============================== repo ==============================
 
 local Repo = {}
@@ -288,6 +436,9 @@ function Repo.categoryColor(name)
 			return cat.color
 		end
 	end
+	if name ~= "General" and name ~= nil and name ~= "" then
+		return Color3.fromHSV((hashString(string.lower(name)) % 360) / 360, 0.55, 1)
+	end
 	return CONFIG.GeneralColor
 end
 
@@ -301,7 +452,8 @@ function Repo.build(raw)
 		local top = string.match(item.path, "^([^/]+)/")
 		top = top and string.lower(top)
 
-		local kind = meta.kind
+		local ov = Sync.overrides[string.lower(item.path)]
+		local kind = (ov and ov.kind) or meta.kind
 		if not kind and top then
 			if CONFIG.WeaponFolders[top] then
 				kind = "Weapons"
@@ -319,7 +471,7 @@ function Repo.build(raw)
 		end
 		kind = kind or "Powers"
 
-		local category = meta.category
+		local category = (ov and ov.category) or meta.category
 		if not category then
 			for _, cat in ipairs(CONFIG.Categories) do
 				for _, w in ipairs(cat.words) do
@@ -336,6 +488,7 @@ function Repo.build(raw)
 		local pretty = string.gsub(base, "^%d+[%s%._%-]+", "")
 		pretty = string.gsub(pretty, "_", " ")
 		if pretty == "" then pretty = base end
+		if ov and ov.name then pretty = ov.name end
 
 		table.insert(out, {
 			name = pretty,
@@ -344,9 +497,11 @@ function Repo.build(raw)
 			url = item.url,
 			kind = kind,
 			category = category,
-			color = meta.color or Repo.categoryColor(category),
+			color = (not (ov and ov.category) and meta.color) or Repo.categoryColor(category),
 			desc = meta.desc,
 			seed = hashString(item.path),
+			key = string.lower(item.path),
+			edited = ov ~= nil,
 			info = nil,
 		})
 	end
@@ -812,7 +967,299 @@ end
 
 --// ============================== icons ==============================
 
-local function buildSigil(parent, size, seed, color, kind)
+local function ring(parent, d, x, y, color, thick)
+	local f = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, x, 0.5, y),
+		Size = UDim2.fromOffset(d, d),
+		BackgroundTransparency = 1,
+		Parent = parent,
+	})
+	corner(f, math.ceil(d / 2))
+	stroke(f, color, thick or 1.25)
+	return f
+end
+
+local function disc(parent, d, x, y, color)
+	local f = bar(parent, d, d, x, y, 0, color)
+	corner(f, math.ceil(d / 2))
+	return f
+end
+
+local function sq(parent, d, rot, color, thick)
+	local f = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(d, d),
+		Rotation = rot,
+		BackgroundTransparency = 1,
+		Parent = parent,
+	})
+	stroke(f, color, thick or 1.25)
+	return f
+end
+
+local function radial(h, count, r, len, th, color, offsetDeg)
+	for i = 0, count - 1 do
+		local deg = (i * 360 / count) + (offsetDeg or 0)
+		local a = math.rad(deg)
+		bar(h, th, len, math.cos(a) * r, math.sin(a) * r, deg - 90, color)
+	end
+end
+
+--// one little emblem per ability, drawn only with frames. s = icon size, c = colour
+local Glyphs = {}
+
+Glyphs.ice = function(h, s, c)
+	for _, r in ipairs({ 0, 60, 120 }) do
+		bar(h, s * 0.62, 2, 0, 0, r, c)
+	end
+	for r = 0, 300, 60 do
+		local a = math.rad(r)
+		bar(h, 3, 3, math.cos(a) * s * 0.31, math.sin(a) * s * 0.31, 45, c)
+	end
+end
+
+Glyphs.fire = function(h, s, c)
+	ring(h, s * 0.34, 0, s * 0.1, c, 1.5)
+	bar(h, s * 0.2, s * 0.2, 0, -s * 0.15, 45, c)
+	bar(h, 3, 3, 0, s * 0.1, 45, c)
+	bar(h, 2, 2, -s * 0.24, -s * 0.1, 45, c)
+	bar(h, 2, 2, s * 0.24, -s * 0.02, 45, c)
+end
+
+Glyphs.water = function(h, s, c)
+	ring(h, s * 0.34, 0, s * 0.08, c, 1.5)
+	bar(h, s * 0.2, s * 0.2, 0, -s * 0.15, 45, c)
+	bar(h, s * 0.16, 2, 0, s * 0.08, 0, c)
+	bar(h, s * 0.1, 2, 0, s * 0.15, 0, c)
+end
+
+Glyphs.storm = function(h, s, c)
+	bar(h, 3, s * 0.34, s * 0.09, -s * 0.17, 28, c)
+	bar(h, s * 0.26, 3, 0, 0, 0, c)
+	bar(h, 3, s * 0.34, -s * 0.09, s * 0.17, 28, c)
+end
+
+Glyphs.wind = function(h, s, c)
+	bar(h, s * 0.5, 2, -s * 0.04, -s * 0.15, 0, c)
+	bar(h, s * 0.62, 2, 0, 0, 0, c)
+	bar(h, s * 0.4, 2, s * 0.06, s * 0.15, 0, c)
+	ring(h, 6, s * 0.25, -s * 0.15, c, 1.25)
+	ring(h, 6, -s * 0.28, s * 0.15, c, 1.25)
+end
+
+Glyphs.earth = function(h, s, c)
+	bar(h, s * 0.58, 3, 0, s * 0.15, 0, c)
+	bar(h, s * 0.44, 3, 0, 0, 0, c)
+	bar(h, s * 0.3, 3, 0, -s * 0.15, 0, c)
+	bar(h, 4, 4, 0, -s * 0.27, 45, c)
+end
+
+Glyphs.nature = function(h, s, c)
+	local leaf = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(s * 0.3, s * 0.52),
+		Rotation = 35,
+		BackgroundTransparency = 1,
+		Parent = h,
+	})
+	corner(leaf, s)
+	stroke(leaf, c, 1.5)
+	bar(h, 2, s * 0.52, 0, 0, 35, c)
+end
+
+Glyphs.light = function(h, s, c)
+	ring(h, s * 0.22, 0, 0, c, 1.5)
+	disc(h, 4, 0, 0, c)
+	radial(h, 8, s * 0.3, s * 0.12, 2, c)
+end
+
+Glyphs.dark = function(h, s, c)
+	ring(h, s * 0.4, -s * 0.04, 0, c, 1.5)
+	ring(h, s * 0.32, s * 0.08, 0, c, 1.25)
+	disc(h, 3, -s * 0.04, 0, c)
+end
+
+Glyphs.void = function(h, s, c)
+	ring(h, s * 0.5, 0, 0, c, 1.25)
+	ring(h, s * 0.32, 0, 0, c, 1.25)
+	ring(h, s * 0.14, 0, 0, c, 1.25)
+	disc(h, 3, 0, 0, c)
+end
+
+Glyphs.blood = function(h, s, c)
+	ring(h, s * 0.3, 0, s * 0.1, c, 1.5)
+	bar(h, s * 0.18, s * 0.18, 0, -s * 0.12, 45, c)
+	bar(h, 2, 6, 0, s * 0.1, 0, c)
+	bar(h, 6, 2, 0, s * 0.1, 0, c)
+end
+
+Glyphs.poison = function(h, s, c)
+	ring(h, s * 0.42, 0, -s * 0.04, c, 1.5)
+	disc(h, 4, -s * 0.07, -s * 0.05, c)
+	disc(h, 4, s * 0.07, -s * 0.05, c)
+	bar(h, s * 0.16, 2, 0, s * 0.2, 0, c)
+	bar(h, 2, 4, -s * 0.04, s * 0.2, 0, c)
+	bar(h, 2, 4, s * 0.04, s * 0.2, 0, c)
+end
+
+Glyphs.gravity = function(h, s, c)
+	ring(h, s * 0.46, 0, 0, c, 1.25)
+	ring(h, s * 0.18, 0, 0, c, 1.25)
+	for _, d in ipairs({ { 0, -1 }, { 1, 0 }, { 0, 1 }, { -1, 0 } }) do
+		bar(h, 3, 3, d[1] * s * 0.3, d[2] * s * 0.3, 45, c)
+	end
+end
+
+Glyphs.time = function(h, s, c)
+	ring(h, s * 0.46, 0, 0, c, 1.5)
+	bar(h, 2, s * 0.18, 0, -s * 0.08, 0, c)
+	bar(h, s * 0.14, 2, s * 0.06, 0, 0, c)
+	radial(h, 4, s * 0.27, 3, 2, c)
+end
+
+Glyphs.space = function(h, s, c)
+	ring(h, s * 0.28, 0, 0, c, 1.5)
+	bar(h, s * 0.64, 1.5, 0, 0, -25, c)
+	disc(h, 3, -s * 0.24, -s * 0.2, c)
+	disc(h, 2, s * 0.25, s * 0.22, c)
+end
+
+Glyphs.psychic = function(h, s, c)
+	local eye = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(s * 0.62, s * 0.32),
+		BackgroundTransparency = 1,
+		Parent = h,
+	})
+	corner(eye, s)
+	stroke(eye, c, 1.5)
+	ring(h, s * 0.14, 0, 0, c, 1.5)
+	disc(h, 3, 0, 0, c)
+end
+
+Glyphs.sound = function(h, s, c)
+	local hs = { 0.18, 0.34, 0.5, 0.34, 0.18 }
+	for i, v in ipairs(hs) do
+		bar(h, 2.5, s * v, (i - 3) * s * 0.12, 0, 0, c)
+	end
+end
+
+Glyphs.metal = function(h, s, c)
+	sq(h, s * 0.4, 0, c, 1.5)
+	sq(h, s * 0.4, 45, c, 1.5)
+	disc(h, 3, 0, 0, c)
+end
+
+Glyphs.magma = function(h, s, c)
+	bar(h, 3, s * 0.4, -s * 0.1, -s * 0.02, 28, c)
+	bar(h, 3, s * 0.4, s * 0.1, -s * 0.02, -28, c)
+	bar(h, s * 0.5, 2, 0, s * 0.18, 0, c)
+	bar(h, 3, 3, 0, -s * 0.24, 45, c)
+	bar(h, 2, 2, s * 0.16, -s * 0.22, 45, c)
+end
+
+Glyphs.sand = function(h, s, c)
+	bar(h, s * 0.5, 2, -s * 0.04, s * 0.1, -8, c)
+	bar(h, s * 0.4, 2, s * 0.06, -s * 0.02, 8, c)
+	bar(h, s * 0.5, 2, -s * 0.03, -s * 0.14, -8, c)
+	disc(h, 2, s * 0.22, s * 0.22, c)
+	disc(h, 2, -s * 0.24, -s * 0.24, c)
+end
+
+Glyphs.magic = function(h, s, c)
+	ring(h, s * 0.5, 0, 0, c, 1.25)
+	for _, r in ipairs({ 0, 60, 120 }) do
+		bar(h, s * 0.46, 1.5, 0, 0, r, c)
+	end
+	disc(h, 3, 0, 0, c)
+end
+
+Glyphs.curse = function(h, s, c)
+	ring(h, s * 0.46, 0, 0, c, 1.25)
+	bar(h, s * 0.4, 2, 0, 0, 45, c)
+	bar(h, s * 0.4, 2, 0, 0, -45, c)
+	disc(h, 3, 0, 0, c)
+end
+
+Glyphs.spirit = function(h, s, c)
+	ring(h, s * 0.34, 0, -s * 0.07, c, 1.5)
+	for _, x in ipairs({ -0.1, 0, 0.1 }) do
+		bar(h, 2, s * 0.16, x * s, s * 0.17, 0, c)
+	end
+	disc(h, 2, -s * 0.06, -s * 0.08, c)
+	disc(h, 2, s * 0.06, -s * 0.08, c)
+end
+
+Glyphs.energy = function(h, s, c)
+	sq(h, s * 0.4, 45, c, 1.5)
+	sq(h, s * 0.18, 45, c, 1.25)
+	radial(h, 4, s * 0.33, s * 0.1, 2, c)
+end
+
+Glyphs.explosion = function(h, s, c)
+	bar(h, s * 0.62, 2, 0, 0, 0, c)
+	bar(h, s * 0.62, 2, 0, 0, 90, c)
+	bar(h, s * 0.4, 2, 0, 0, 45, c)
+	bar(h, s * 0.4, 2, 0, 0, -45, c)
+	ring(h, s * 0.2, 0, 0, c, 1.5)
+end
+
+Glyphs.healing = function(h, s, c)
+	ring(h, s * 0.5, 0, 0, c, 1.25)
+	bar(h, 3, s * 0.3, 0, 0, 0, c)
+	bar(h, s * 0.3, 3, 0, 0, 0, c)
+end
+
+Glyphs.summon = function(h, s, c)
+	bar(h, 5, 5, 0, -s * 0.17, 45, c)
+	bar(h, 5, 5, -s * 0.15, s * 0.1, 45, c)
+	bar(h, 5, 5, s * 0.15, s * 0.1, 45, c)
+	ring(h, s * 0.12, 0, 0, c, 1.25)
+end
+
+Glyphs.movement = function(h, s, c)
+	for _, x in ipairs({ -0.1, 0.1 }) do
+		bar(h, s * 0.2, 2.5, x * s - s * 0.03, -s * 0.07, 45, c)
+		bar(h, s * 0.2, 2.5, x * s - s * 0.03, s * 0.07, -45, c)
+	end
+end
+
+Glyphs.combat = function(h, s, c)
+	bar(h, 2.5, s * 0.62, 0, 0, 45, c)
+	bar(h, 2.5, s * 0.62, 0, 0, -45, c)
+	disc(h, 4, 0, 0, c)
+end
+
+Glyphs.blade = function(h, s, c)
+	bar(h, math.max(2, s * 0.09), s * 0.58, 0, 0, 45, c)
+	bar(h, s * 0.3, math.max(2, s * 0.07), -s * 0.1, s * 0.1, 45, c)
+	bar(h, math.max(3, s * 0.1), math.max(3, s * 0.1), -s * 0.21, s * 0.21, 45, c)
+end
+
+Glyphs.ranged = function(h, s, c)
+	ring(h, s * 0.4, 0, 0, c, 1.5)
+	for _, d in ipairs({ { 0, -1 }, { 1, 0 }, { 0, 1 }, { -1, 0 } }) do
+		bar(h, d[1] == 0 and 2 or s * 0.16, d[2] == 0 and 2 or s * 0.16, d[1] * s * 0.3, d[2] * s * 0.3, 0, c)
+	end
+	disc(h, 3, 0, 0, c)
+end
+
+Glyphs.blunt = function(h, s, c)
+	bar(h, 3, s * 0.52, -s * 0.03, s * 0.03, 45, c)
+	bar(h, s * 0.3, s * 0.14, s * 0.13, -s * 0.13, 45, c)
+end
+
+Glyphs.general = function(h, s, c)
+	local inner = sq(h, s * 0.3, 0, c, 1)
+	bar(h, math.max(3, s * 0.1), math.max(3, s * 0.1), 0, 0, 45, c)
+	return { inner = inner }
+end
+
+local function buildSigil(parent, size, seed, color, kind, category)
 	local holder = new("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
@@ -824,7 +1271,7 @@ local function buildSigil(parent, size, seed, color, kind)
 	local outer = new("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.fromOffset(size * 0.64, size * 0.64),
+		Size = UDim2.fromOffset(size * 0.74, size * 0.74),
 		Rotation = 45,
 		BackgroundTransparency = 1,
 		Parent = holder,
@@ -832,28 +1279,39 @@ local function buildSigil(parent, size, seed, color, kind)
 	stroke(outer, color, size > 40 and 1.5 or 1.25)
 	parts.outer = outer
 
-	if kind == "Weapons" then
-		bar(holder, math.max(2, size * 0.09), size * 0.58, 0, 0, 45, color)
-		bar(holder, size * 0.3, math.max(2, size * 0.07), -size * 0.1, size * 0.1, 45, color)
-		bar(holder, math.max(3, size * 0.1), math.max(3, size * 0.1), -size * 0.21, size * 0.21, 45, color)
-	else
-		local inner = new("Frame", {
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromOffset(size * 0.3, size * 0.3),
-			BackgroundTransparency = 1,
-			Parent = holder,
-		})
-		stroke(inner, color, 1)
-		parts.inner = inner
-		bar(holder, math.max(3, size * 0.1), math.max(3, size * 0.1), 0, 0, 45, color)
+	local g = Glyphs[string.lower(category or "")]
+	if not g then
+		g = kind == "Weapons" and Glyphs.blade or Glyphs.general
+	end
+	local content = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(size, size),
+		BackgroundTransparency = 1,
+		Parent = holder,
+	})
+	local gp = g(content, size, color)
+	if gp and gp.inner then
+		parts.inner = gp.inner
 	end
 
 	local ticks = 2 + (seed % 3)
 	for i = 1, ticks do
 		local ang = math.rad((seed * (i * 53 + 7)) % 360)
-		local r = size * 0.47
+		local r = size * 0.55
 		bar(holder, 2, 2, math.cos(ang) * r, math.sin(ang) * r, 45, color)
+	end
+
+	if size >= 40 then
+		local orbit = new("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(size * 1.02, size * 1.02),
+			BackgroundTransparency = 1,
+			Parent = holder,
+		})
+		bar(orbit, 4, 4, 0, -size * 0.51, 45, color)
+		parts.orbit = orbit
 	end
 	return holder, parts
 end
@@ -871,16 +1329,21 @@ local function makeIcon(parent, kind)
 		local d = new("Frame", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromOffset(13, 13),
+			Size = UDim2.fromOffset(12, 12),
 			Rotation = 45,
 			BackgroundTransparency = 1,
 			Parent = holder,
 		})
 		table.insert(icon.strokes, stroke(d, THEME.dim, 1.5))
 		table.insert(icon.fills, bar(holder, 4, 4, 0, 0, 45, THEME.dim))
+		for _, p in ipairs({ { 0, -10 }, { 0, 10 }, { -10, 0 }, { 10, 0 } }) do
+			table.insert(icon.fills, bar(holder, 2, 2, p[1], p[2], 45, THEME.dim))
+		end
 	elseif kind == "Weapons" then
-		table.insert(icon.fills, bar(holder, 3, 18, 0, 0, 45, THEME.dim))
-		table.insert(icon.fills, bar(holder, 10, 2, -3, 3, 45, THEME.dim))
+		table.insert(icon.fills, bar(holder, 3, 17, 2, -2, 45, THEME.dim))
+		table.insert(icon.fills, bar(holder, 11, 2, -3, 3, -45, THEME.dim))
+		table.insert(icon.fills, bar(holder, 2, 5, -6, 6, 45, THEME.dim))
+		table.insert(icon.fills, bar(holder, 3, 3, -8, 8, 45, THEME.dim))
 	else
 		for i, kx in ipairs({ -4, 3, -1 }) do
 			local y = (i - 2) * 6
@@ -1208,6 +1671,16 @@ local function createBrowser(kind)
 	new("Frame", { Size = UDim2.new(0, 1, 1, 0), BackgroundColor3 = THEME.line, Parent = pv })
 	brackets(pv, 7, 8, 4)
 
+	local sigilGlow = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0, 42),
+		Size = UDim2.fromOffset(80, 80),
+		BackgroundColor3 = Accent.color,
+		BackgroundTransparency = 0.9,
+		Parent = pv,
+	})
+	corner(sigilGlow, 40)
+	B.glow = sigilGlow
 	local sigilBox = new("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 12),
@@ -1324,6 +1797,40 @@ local function createBrowser(kind)
 		for _, s in ipairs(copyParts) do tw(s, { Color = THEME.dim }, 0.15) end
 	end))
 
+	local editBtn = new("TextButton", {
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -46, 1, -10),
+		Size = UDim2.fromOffset(32, 30),
+		BackgroundColor3 = THEME.raised,
+		Visible = false,
+		Parent = pv,
+	})
+	corner(editBtn, 3)
+	local editStroke = stroke(editBtn, THEME.line, 1)
+	local editParts = {
+		bar(editBtn, 3, 13, 2, -1, 45, THEME.dim),
+		bar(editBtn, 3, 3, -5, 6, 45, THEME.dim),
+	}
+	pressFx(editBtn)
+	track(editBtn.MouseEnter:Connect(function()
+		tw(editStroke, { Color = Accent.color }, 0.12)
+		for _, p in ipairs(editParts) do tw(p, { BackgroundColor3 = Accent.color }, 0.12) end
+	end))
+	track(editBtn.MouseLeave:Connect(function()
+		tw(editStroke, { Color = THEME.line }, 0.15)
+		for _, p in ipairs(editParts) do tw(p, { BackgroundColor3 = THEME.dim }, 0.15) end
+	end))
+	track(editBtn.Activated:Connect(function()
+		if B.current and Owner.ok then
+			pulse(editBtn)
+			UI.openEditor(B.current)
+		end
+	end))
+	function B.refreshOwner()
+		editBtn.Visible = Owner.ok
+		primary.Size = UDim2.new(1, Owner.ok and -94 or -58, 0, 30)
+	end
+
 	--// painting
 
 	local function paintPrimary(instant)
@@ -1411,10 +1918,13 @@ local function createBrowser(kind)
 		for _, c in ipairs(sigilBox:GetChildren()) do
 			c:Destroy()
 		end
-		local _, parts = buildSigil(sigilBox, 56, entry.seed, entry.color, kind)
+		local _, parts = buildSigil(sigilBox, 56, entry.seed, entry.color, kind, entry.category)
 		B.spin = parts
+		sigilGlow.BackgroundColor3 = entry.color
 		if UI.current == kind then
 			State.spin = parts
+			State.glow = sigilGlow
+			Accent.set(entry.color)
 		end
 		nameLabel.Text = entry.name
 		nameLabel.TextTransparency = 1
@@ -1459,6 +1969,15 @@ local function createBrowser(kind)
 		if r then
 			paintRow(r, false)
 			B.showEntry(r.entry)
+		end
+	end
+
+	function B.selectPath(path)
+		for _, r in ipairs(B.rows) do
+			if r.entry.path == path then
+				B.select(r)
+				return
+			end
 		end
 	end
 
@@ -1610,7 +2129,7 @@ local function createBrowser(kind)
 			BackgroundTransparency = 1,
 			Parent = body,
 		})
-		buildSigil(sigilHold, 34, entry.seed, entry.color, kind)
+		buildSigil(sigilHold, 34, entry.seed, entry.color, kind, entry.category)
 		local nameL = new("TextLabel", {
 			Position = UDim2.fromOffset(56, 6),
 			Size = UDim2.new(1, -56 - 76, 0, 16),
@@ -1726,6 +2245,10 @@ local function createBrowser(kind)
 
 	function B.onShow()
 		State.spin = B.spin
+		State.glow = B.glow
+		if B.current then
+			Accent.set(B.current.color)
+		end
 		B.animateIn()
 	end
 
@@ -1889,6 +2412,26 @@ local function createSettings()
 		end))
 	end
 
+	heading("LIVE SYNC")
+	do
+		local r = row("Live sync", "names + abilities set by DuaKNo update for everyone", 44)
+		local b = ghostButton(r, "SYNC NOW", false)
+		b.AnchorPoint = Vector2.new(1, 0.5)
+		b.Position = UDim2.new(1, -14, 0.5, 0)
+		b.Size = UDim2.fromOffset(96, 22)
+		track(b.Activated:Connect(function()
+			task.spawn(function()
+				status("syncing...")
+				if Sync.pull() then
+					UI.rebuild()
+				end
+				status(Sync.status, THEME.dim)
+			end)
+		end))
+		UI.ownerRow = row("Owner mode", "select a script, press the pencil: rename it, set its ability", 44)
+		UI.ownerRow.Visible = Owner.ok
+	end
+
 	heading("ACTIONS")
 	do
 		local f = new("Frame", { LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, Parent = scroll })
@@ -1973,6 +2516,321 @@ local function createSettings()
 	end
 
 	return { page = page }
+end
+
+--// ============================== owner editor ==============================
+
+local function createEditor()
+	local E = { entry = nil, kind = "Powers", category = "General", chips = {}, kindChips = {} }
+
+	local overlay = new("TextButton", {
+		Name = "Editor",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 1,
+		Visible = false,
+		ZIndex = 40,
+		Parent = UI.window,
+	})
+	local card = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(1, -28, 1, -28),
+		BackgroundColor3 = THEME.panel,
+		ZIndex = 41,
+		Parent = overlay,
+	})
+	new("UISizeConstraint", { MaxSize = Vector2.new(400, 330), Parent = card })
+	corner(card, 4)
+	stroke(card, THEME.line, 1)
+	brackets(card, 7, 8, 44)
+
+	local scroll = new("ScrollingFrame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		ScrollBarThickness = 2,
+		ScrollBarImageColor3 = Accent.color,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ElasticBehavior = Enum.ElasticBehavior.Never,
+		ZIndex = 42,
+		Parent = card,
+	})
+	Accent.bind(function(c)
+		scroll.ScrollBarImageColor3 = c
+	end)
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6), Parent = scroll })
+	new("UIPadding", {
+		PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14),
+		PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 12),
+		Parent = scroll,
+	})
+
+	local order = 0
+	local function nextOrder()
+		order += 1
+		return order
+	end
+
+	local function label(text)
+		return new("TextLabel", {
+			LayoutOrder = nextOrder(),
+			Size = UDim2.new(1, 0, 0, 14),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			TextSize = 10,
+			TextColor3 = THEME.dim,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Text = text,
+			ZIndex = 43,
+			Parent = scroll,
+		})
+	end
+
+	local title = label("")
+	title.TextSize = 11
+	title.TextColor3 = THEME.text
+	title.Size = UDim2.new(1, 0, 0, 18)
+
+	local function inputBox(placeholder)
+		local wrap = new("Frame", {
+			LayoutOrder = nextOrder(),
+			Size = UDim2.new(1, 0, 0, 26),
+			BackgroundColor3 = THEME.raised,
+			ZIndex = 43,
+			Parent = scroll,
+		})
+		corner(wrap, 3)
+		local st = stroke(wrap, THEME.line, 1)
+		local box = new("TextBox", {
+			Position = UDim2.fromOffset(9, 0),
+			Size = UDim2.new(1, -18, 1, 0),
+			BackgroundTransparency = 1,
+			ClearTextOnFocus = false,
+			Font = Enum.Font.Code,
+			TextSize = 12,
+			TextColor3 = THEME.text,
+			PlaceholderColor3 = THEME.faint,
+			PlaceholderText = placeholder,
+			Text = "",
+			TextXAlignment = Enum.TextXAlignment.Left,
+			ZIndex = 44,
+			Parent = wrap,
+		})
+		track(box.Focused:Connect(function()
+			tw(st, { Color = Accent.color }, 0.15)
+		end))
+		track(box.FocusLost:Connect(function()
+			tw(st, { Color = THEME.line }, 0.2)
+		end))
+		return box
+	end
+
+	label("NAME")
+	local nameBox = inputBox("script name")
+
+	label("TYPE")
+	local kindRow = new("Frame", {
+		LayoutOrder = nextOrder(),
+		Size = UDim2.new(1, 0, 0, 22),
+		BackgroundTransparency = 1,
+		ZIndex = 43,
+		Parent = scroll,
+	})
+	new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Padding = UDim.new(0, 6),
+		Parent = kindRow,
+	})
+
+	local function paintChip(chip, active)
+		tw(chip.btn, {
+			BackgroundColor3 = active and chip.color or THEME.raised,
+			TextColor3 = active and THEME.ink or THEME.dim,
+		}, 0.12)
+	end
+
+	local function makeChip(parent, text, color, onClick)
+		local btn = new("TextButton", {
+			BackgroundColor3 = THEME.raised,
+			Font = Enum.Font.Code,
+			TextSize = 10,
+			TextColor3 = THEME.dim,
+			Text = text,
+			ZIndex = 44,
+			Parent = parent,
+		})
+		corner(btn, 3)
+		pressFx(btn)
+		local chip = { btn = btn, color = color }
+		track(btn.Activated:Connect(onClick))
+		return chip
+	end
+
+	local function paintKinds()
+		for k, chip in pairs(E.kindChips) do
+			paintChip(chip, E.kind == k)
+		end
+	end
+	for i, k in ipairs({ "Powers", "Weapons" }) do
+		local chip = makeChip(kindRow, k == "Powers" and "POWER" or "WEAPON", THEME.accents[k], function()
+			E.kind = k
+			paintKinds()
+		end)
+		chip.btn.LayoutOrder = i
+		chip.btn.Size = UDim2.new(0.5, -3, 1, 0)
+		E.kindChips[k] = chip
+	end
+
+	label("ABILITY")
+	local grid = new("Frame", {
+		LayoutOrder = nextOrder(),
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		ZIndex = 43,
+		Parent = scroll,
+	})
+	new("UIGridLayout", {
+		CellSize = UDim2.fromOffset(78, 22),
+		CellPadding = UDim2.fromOffset(4, 4),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = grid,
+	})
+
+	label("OR TYPE YOUR OWN ABILITY")
+	local customBox = inputBox("custom ability name")
+
+	local function paintCats()
+		local typed = string.gsub(customBox.Text, "%s", "") ~= ""
+		for name, chip in pairs(E.chips) do
+			paintChip(chip, (not typed) and E.category == name)
+		end
+	end
+
+	local names = {}
+	for _, cat in ipairs(CONFIG.Categories) do
+		table.insert(names, cat.name)
+	end
+	table.sort(names)
+	table.insert(names, "General")
+	for i, name in ipairs(names) do
+		local chip = makeChip(grid, string.upper(name), Repo.categoryColor(name), function()
+			E.category = name
+			customBox.Text = ""
+			paintCats()
+		end)
+		chip.btn.LayoutOrder = i
+		E.chips[name] = chip
+	end
+	track(customBox:GetPropertyChangedSignal("Text"):Connect(paintCats))
+
+	local statusLine = label("")
+	statusLine.TextColor3 = THEME.faint
+
+	local btnRow = new("Frame", {
+		LayoutOrder = nextOrder(),
+		Size = UDim2.new(1, 0, 0, 30),
+		BackgroundTransparency = 1,
+		ZIndex = 43,
+		Parent = scroll,
+	})
+	new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 6),
+		Parent = btnRow,
+	})
+
+	local saveBtn = new("TextButton", {
+		LayoutOrder = 1,
+		Size = UDim2.new(0.4, -4, 1, 0),
+		BackgroundColor3 = Accent.color,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = THEME.ink,
+		Text = "SAVE + SYNC",
+		ZIndex = 44,
+		Parent = btnRow,
+	})
+	corner(saveBtn, 3)
+	pressFx(saveBtn)
+	Accent.bind(function(c)
+		saveBtn.BackgroundColor3 = c
+	end)
+	local resetBtn = ghostButton(btnRow, "RESET", false)
+	resetBtn.LayoutOrder = 2
+	resetBtn.Size = UDim2.new(0.3, -4, 1, 0)
+	resetBtn.ZIndex = 44
+	local cancelBtn = ghostButton(btnRow, "CANCEL", true)
+	cancelBtn.LayoutOrder = 3
+	cancelBtn.Size = UDim2.new(0.3, -4, 1, 0)
+	cancelBtn.ZIndex = 44
+
+	local function close()
+		E.entry = nil
+		tw(overlay, { BackgroundTransparency = 1 }, 0.15)
+		task.delay(State.settings.Animations and 0.16 or 0.01, function()
+			if not E.entry then
+				overlay.Visible = false
+			end
+		end)
+	end
+
+	local function trim(s)
+		return (string.gsub(string.gsub(s, "^%s+", ""), "%s+$", ""))
+	end
+
+	local function commit(entry, ov, text)
+		if not Owner.ok then return end
+		Sync.overrides[entry.key] = ov
+		local path, kind = entry.path, ov and ov.kind or entry.kind
+		close()
+		UI.rebuild(path, kind)
+		status("saving " .. text .. "...")
+		task.spawn(function()
+			local ok, err = Sync.push()
+			status(ok and ("saved + synced: " .. text) or tostring(err), ok and THEME.good or THEME.bad)
+		end)
+	end
+
+	track(saveBtn.Activated:Connect(function()
+		local e = E.entry
+		if not e then return end
+		pulse(saveBtn)
+		local name = trim(nameBox.Text)
+		if name == "" then name = e.name end
+		local cat = trim(customBox.Text)
+		if cat == "" then cat = E.category end
+		commit(e, { name = string.sub(name, 1, 40), category = string.sub(cat, 1, 20), kind = E.kind }, name)
+	end))
+	track(resetBtn.Activated:Connect(function()
+		local e = E.entry
+		if not e then return end
+		commit(e, nil, e.name)
+	end))
+	track(cancelBtn.Activated:Connect(close))
+
+	function UI.openEditor(entry)
+		if not Owner.ok or not entry then return end
+		E.entry = entry
+		E.kind = entry.kind
+		E.category = entry.category
+		title.Text = "EDIT  //  " .. string.upper(entry.file)
+		nameBox.Text = entry.name
+		if E.chips[entry.category] then
+			customBox.Text = ""
+		else
+			customBox.Text = entry.category
+		end
+		statusLine.Text = Sync.url() and "changes sync to every player in seconds" or "no npoint bin id set: only you will see changes"
+		paintKinds()
+		paintCats()
+		overlay.Visible = true
+		tw(overlay, { BackgroundTransparency = 0.35 }, 0.2)
+	end
 end
 
 --// ============================== build the window ==============================
@@ -2377,12 +3235,14 @@ local function buildUI()
 		Settings = createSettings().page,
 	}
 
+	createEditor()
+
 	-- launcher tab on the right edge
 	local tab = new("TextButton", {
 		Name = "Tab",
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, 0, 0, CONFIG.TabY),
-		Size = UDim2.fromOffset(24, 52),
+		Size = UDim2.fromOffset(26, 60),
 		BackgroundColor3 = THEME.panel,
 		ZIndex = 30,
 		Parent = gui,
@@ -2398,7 +3258,7 @@ local function buildUI()
 	})
 	local chevron = new("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 1, 0.5, 0),
+		Position = UDim2.new(0.5, 1, 0.5, 13),
 		Size = UDim2.fromOffset(16, 16),
 		BackgroundTransparency = 1,
 		ZIndex = 31,
@@ -2406,6 +3266,29 @@ local function buildUI()
 	})
 	local chevParts = { bar(chevron, 9, 2, 0, -3, -45, THEME.dim), bar(chevron, 9, 2, 0, 3, 45, THEME.dim) }
 	for _, p in ipairs(chevParts) do p.ZIndex = 31 end
+	local emblem = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 1, 0.5, -12),
+		Size = UDim2.fromOffset(13, 13),
+		Rotation = 45,
+		BackgroundTransparency = 1,
+		ZIndex = 31,
+		Parent = tab,
+	})
+	local emblemStroke = stroke(emblem, Accent.color, 1.5)
+	local emblemDot = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(4, 4),
+		BackgroundColor3 = Accent.color,
+		ZIndex = 31,
+		Parent = emblem,
+	})
+	Accent.bind(function(c)
+		emblemStroke.Color = c
+		emblemDot.BackgroundColor3 = c
+	end)
+	State.emblem = emblem
 	Accent.bind(function(c)
 		tabMark.BackgroundColor3 = c
 	end)
@@ -2531,7 +3414,37 @@ function UI.switchTo(name, instant)
 	if b then
 		b.onShow()
 	else
-		State.spin = nil
+		State.spin, State.glow = nil, nil
+	end
+end
+
+function UI.rebuild(selectPath, selectKind)
+	if not State.raw then return end
+	State.entries = Repo.build(State.raw)
+	for kind, b in pairs(UI.browsers) do
+		local list = {}
+		for _, e in ipairs(State.entries) do
+			if e.kind == kind then
+				table.insert(list, e)
+			end
+		end
+		b.load(list)
+	end
+	UI.updateCounts()
+	if selectPath and selectKind and UI.browsers[selectKind] then
+		if UI.current ~= selectKind then
+			UI.switchTo(selectKind)
+		end
+		UI.browsers[selectKind].selectPath(selectPath)
+	end
+end
+
+function UI.refreshOwner()
+	for _, b in pairs(UI.browsers) do
+		b.refreshOwner()
+	end
+	if UI.ownerRow then
+		UI.ownerRow.Visible = Owner.ok
 	end
 end
 
@@ -2557,6 +3470,8 @@ function UI.populate()
 	table.sort(raw, function(a, b)
 		return string.lower(a.path) < string.lower(b.path)
 	end)
+	State.raw = raw
+	Sync.pull()
 	State.entries = Repo.build(raw)
 	for kind, b in pairs(UI.browsers) do
 		local list = {}
@@ -2628,7 +3543,12 @@ local function main()
 	-- animated bits: one heartbeat, only while the window is visible
 	local clock = 0
 	track(RunService.Heartbeat:Connect(function(dt)
-		if not State.alive or not UI.shell.Visible or UI.minimized then return end
+		if not State.alive then return end
+		if State.emblem and State.emblem.Parent and State.settings.Animations then
+			State.emblemT = (State.emblemT or 0) + dt
+			State.emblem.Rotation = 45 + State.emblemT * 40
+		end
+		if not UI.shell.Visible or UI.minimized then return end
 		if not State.settings.Animations then return end
 		clock += dt
 		UI.strokeGrad.Rotation = (clock * 36) % 360
@@ -2640,7 +3560,14 @@ local function main()
 				spin.inner.Rotation = -clock * 28
 			end
 		end
-		if State.settings.Particles then
+		if spin and spin.orbit and spin.orbit.Parent then
+				spin.orbit.Rotation = clock * 55
+			end
+			local glow = State.glow
+			if glow and glow.Parent then
+				glow.BackgroundTransparency = 0.89 + 0.05 * math.sin(clock * 2)
+			end
+			if State.settings.Particles then
 			for _, p in ipairs(UI.particles) do
 				p.y -= p.speed * dt
 				if p.y < -0.05 then
@@ -2688,6 +3615,24 @@ local function main()
 	UI.setOpen(true)
 	creditNotifications()
 	task.spawn(UI.populate)
+
+	task.spawn(function()
+		Owner.ok = Owner.verify()
+		if Owner.ok and State.alive then
+			UI.refreshOwner()
+			status("owner mode on")
+		end
+	end)
+	task.spawn(function()
+		while State.alive do
+			task.wait(math.max(5, CONFIG.Npoint.PollSeconds or 15))
+			if State.alive and State.raw and Sync.url() then
+				if Sync.pull() then
+					UI.rebuild()
+				end
+			end
+		end
+	end)
 end
 
 local ok, err = pcall(main)
