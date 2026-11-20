@@ -37,8 +37,9 @@ local CONFIG = {
 
 	-- only this account can rename scripts / set abilities (name AND real user id are checked)
 	OwnerNames = { "DuaKNo" },
+	OwnerIds = { 8014469067 }, -- DuaKNo's real user id, checked first so it works even offline
 	-- edits are saved to this npoint bin and every player pulls them. make a bin at npoint.io with {} and paste its id
-	Npoint = { BinId = "", PollSeconds = 15 },
+	Npoint = { BinId = "a58c8d3a0629b499d993", PollSeconds = 15 },
 
 	-- folders decide the section first: Repo/Weapons/x.lua -> WEAPONS
 	WeaponFolders = { weapon = true, weapons = true, guns = true, arms = true, arsenal = true },
@@ -90,10 +91,15 @@ local CONFIG = {
 	-- per file overrides, key = file name without extension. every field is optional
 	-- kind = "Powers" | "Weapons", category = any name, desc = text, color = Color3
 	Meta = {
-		["1 Snowgrave and Iceshock by DuaKNo"] = {
+		["Snowgrave_by_DuaKNo"] = {
 			kind = "Powers",
 			category = "Ice",
-			desc = "Snowgrave and Iceshock, custom ice spells.",
+			desc = "Snowgrave: pray pose, blizzard, then the freezing beam falls where you aim.",
+		},
+		["Iceshock_by_DuaKNo"] = {
+			kind = "Weapons",
+			category = "Ice",
+			desc = "Iceshock: an ice ball flies to your click and freezes the target.",
 		},
 	},
 }
@@ -369,6 +375,11 @@ end
 -- name must match AND the real account behind that name must be this player
 function Owner.verify()
 	local lp = Players.LocalPlayer
+	for _, id in ipairs(CONFIG.OwnerIds or {}) do
+		if lp.UserId == id then
+			return true
+		end
+	end
 	local matched
 	for _, n in ipairs(CONFIG.OwnerNames) do
 		if string.lower(lp.Name) == string.lower(n) then
@@ -1340,10 +1351,12 @@ local function makeIcon(parent, kind)
 			table.insert(icon.fills, bar(holder, 2, 2, p[1], p[2], 45, THEME.dim))
 		end
 	elseif kind == "Weapons" then
-		table.insert(icon.fills, bar(holder, 3, 17, 2, -2, 45, THEME.dim))
-		table.insert(icon.fills, bar(holder, 11, 2, -3, 3, -45, THEME.dim))
-		table.insert(icon.fills, bar(holder, 2, 5, -6, 6, 45, THEME.dim))
-		table.insert(icon.fills, bar(holder, 3, 3, -8, 8, 45, THEME.dim))
+		-- sword: blade, pointed tip, crossguard, grip, pommel
+		table.insert(icon.fills, bar(holder, 3, 15, 2.5, -2.5, 45, THEME.dim))
+		table.insert(icon.fills, bar(holder, 4, 4, 8.4, -8.4, 45, THEME.dim))
+		table.insert(icon.fills, bar(holder, 13, 2.5, -3, 3, 45, THEME.dim))
+		table.insert(icon.fills, bar(holder, 2.5, 5, -5.6, 5.6, 45, THEME.dim))
+		table.insert(icon.fills, bar(holder, 4, 4, -8.2, 8.2, 45, THEME.dim))
 	else
 		for i, kx in ipairs({ -4, 3, -1 }) do
 			local y = (i - 2) * 6
@@ -3100,7 +3113,7 @@ local function buildUI()
 	end)
 	UI.indicator, UI.glow = indicator, glow
 
-	local labels = { Powers = "POWER", Weapons = "ARMS", Settings = "SET" }
+	local labels = { Powers = "POWER", Weapons = "WEAPON", Settings = "SET" }
 	local function tabY(idx)
 		return 8 + (idx - 1) * 54
 	end
