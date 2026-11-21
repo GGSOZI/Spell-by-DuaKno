@@ -147,7 +147,7 @@ local State = {
 	spin = nil,
 	binding = false,
 	toggleKey = Enum.KeyCode.RightShift,
-	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, ToggleKey = "RightShift" },
+	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Affect = true, ToggleKey = "RightShift" },
 }
 
 local Live = { ghosts = {}, starting = {}, my = {}, outbox = {}, sent = {}, seen = {}, hbs = {}, beat = 0, seq = 0, toolOwner = setmetatable({}, { __mode = "k" }) }
@@ -987,6 +987,7 @@ end
 --// every run is announced to firebase. players running the hub in the same server replay your power on their side
 --// only repo paths travel through firebase, the code always comes from the viewer's own repo scan
 
+Live.noted = {}
 Live.screenFx = { BlurEffect = true, ColorCorrectionEffect = true, BloomEffect = true, SunRaysEffect = true, DepthOfFieldEffect = true }
 Live.mouseEventNames = { "Button1Down", "Button1Up", "Button2Down", "Button2Up", "Move", "WheelForward", "WheelBackward", "KeyDown", "KeyUp", "Idle" }
 
@@ -1219,7 +1220,7 @@ function Live.passthrough(real, overrides, blocked)
 end
 
 function Live.buildGhost(g)
-	local plr = g.player
+	local plr = g.affect and Players.LocalPlayer or g.player
 	g.gui = Instance.new("Folder")
 	g.backpack = Instance.new("Folder")
 	g.backpack.Name = "Backpack"
@@ -1375,7 +1376,7 @@ function Live.buildGhost(g)
 		new = function(class, parent)
 			local inst = Instance.new(class)
 			g.created[inst] = true
-			if Live.screenFx[class] then
+			if Live.screenFx[class] and not g.affect then
 				inst.Enabled = false
 			end
 			if parent ~= nil then
@@ -1452,10 +1453,12 @@ function Live.ghostTool(g, ev)
 	end
 	local tool = g.toolList[ev.i]
 	if not tool or not tool.Parent then return end
-	if ev.e == "Equipped" then
-		Live.equip(g, tool)
-	elseif ev.e == "Unequipped" then
-		Live.unequip(g, tool)
+	if not g.affect then
+		if ev.e == "Equipped" then
+			Live.equip(g, tool)
+		elseif ev.e == "Unequipped" then
+			Live.unequip(g, tool)
+		end
 	end
 	Live.fireSignal(tool[ev.e], ev.e == "Equipped" and g.mouse or nil)
 end
@@ -1489,7 +1492,13 @@ function Live.ghostInput(g, ev)
 end
 
 function Live.camGuard()
-	local want = next(Live.ghosts) ~= nil and Runner.count() == 0
+	local any = false
+	for _, g in pairs(Live.ghosts) do
+		if not g.affect then
+			any = true
+		end
+	end
+	local want = any and Runner.count() == 0
 	if want and not Live.guard then
 		Live.guard = true
 		pcall(function()
@@ -1515,7 +1524,20 @@ end
 
 function Live.startGhost(key, w)
 	local plr = Players:GetPlayerByUserId(w.uid)
-	if not plr or not setfenv or not loadstring then return end
+	if not plr then
+		if not Live.noted[key] then
+			Live.noted[key] = true
+			status("live: " .. tostring(w.name or w.uid) .. " is in another server", THEME.bad)
+		end
+		return
+	end
+	if not setfenv or not loadstring then
+		if not Live.noted[key] then
+			Live.noted[key] = true
+			status("live: this executor has no setfenv", THEME.bad)
+		end
+		return
+	end
 	local total, mine = 0, 0
 	for _, g in pairs(Live.ghosts) do
 		total += 1
@@ -1531,14 +1553,21 @@ function Live.startGhost(key, w)
 			break
 		end
 	end
-	if not entry then return end
+	if not entry then
+		if not Live.noted[key] then
+			Live.noted[key] = true
+			status("live: script not found in your repo list", THEME.bad)
+		end
+		return
+	end
+	local affect = State.settings.Affect and entry.kind == "Powers" and entry.category ~= "Movement"
 	Live.starting[key] = true
 	task.spawn(function()
 		local src = Net.source(entry)
 		Live.starting[key] = nil
 		if not src or not State.alive or Live.ghosts[key] then return end
 		local g = {
-			key = key, uid = w.uid, player = plr, entry = entry, hash = w.hash,
+			key = key, uid = w.uid, player = plr, owner = plr, affect = affect and true or false, entry = entry, hash = w.hash,
 			threads = {}, conns = {}, grips = {}, keys = {}, buttons = {}, actions = {}, toolList = {},
 			created = setmetatable({}, { __mode = "k" }),
 		}
@@ -1552,6 +1581,7 @@ function Live.startGhost(key, w)
 		setfenv(fn, g.env)
 		Live.ghosts[key] = g
 		Live.camGuard()
+		status("live: replaying " .. entry.name .. " from " .. tostring(w.name or w.uid), THEME.good)
 		table.insert(g.threads, task.spawn(function()
 			local ok, runErr = pcall(fn)
 			if not ok then
@@ -1623,7 +1653,7 @@ function Live.sync(active)
 				if type(info.r) == "table" then
 					for h, path in pairs(info.r) do
 						if type(path) == "string" then
-							want[uid .. ":" .. h] = { uid = uid, hash = h, path = path }
+							want[uid .. ":" .. h] = { uid = uid, hash = h, path = path, name = info.n }
 						end
 					end
 				end
@@ -1637,7 +1667,7 @@ function Live.sync(active)
 	end
 	local stale = {}
 	for key, g in pairs(Live.ghosts) do
-		if not want[key] or not g.player.Parent then
+		if not want[key] or not g.owner.Parent then
 			table.insert(stale, key)
 		end
 	end
@@ -3217,6 +3247,10 @@ local function createSettings()
 		State.settings.Live = v
 		saveSettings()
 		Live.setEnabled(v)
+	end)
+	makeToggle(row("Powers affect me", "other players' powers hit you too (pull, push, effects)"), State.settings.Affect, function(v)
+		State.settings.Affect = v
+		saveSettings()
 	end)
 	do
 		local r = row("Toggle key", "show or hide the hub")
