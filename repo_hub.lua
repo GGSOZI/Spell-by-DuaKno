@@ -41,7 +41,7 @@ local CONFIG = {
 	-- edits are saved to this npoint bin and every player pulls them. make a bin at npoint.io with {} and paste its id
 	Npoint = { BinId = "a58c8d3a0629b499d993", PollSeconds = 15 },
 	-- firebase realtime database that lets players see each other's powers. paste the database url, no trailing slash
-	Firebase = { Url = "https://power-and-tool-default-rtdb.firebaseio.com", Auth = nil, PollSeconds = 0.7, MaxGhosts = 8, MaxPerPlayer = 3 },
+	Firebase = { Url = "https://power-and-tool-default-rtdb.firebaseio.com", Auth = nil, PollSeconds = 0.5, MaxGhosts = 8, MaxPerPlayer = 3, Debug = true },
 
 	-- folders decide the section first: Repo/Weapons/x.lua -> WEAPONS
 	WeaponFolders = { weapon = true, weapons = true, guns = true, arms = true, arsenal = true },
@@ -988,6 +988,53 @@ end
 --// only repo paths travel through firebase, the code always comes from the viewer's own repo scan
 
 Live.noted = {}
+Live.pending = {}
+Live.myMeta = {}
+
+function Live.fallbackEntry(w)
+	local path = w.path
+	if type(path) ~= "string" or #path > 200 or string.find(path, "..", 1, true) or string.sub(path, 1, 1) == "/" then
+		return nil
+	end
+	local file = string.match(path, "([^/]+)$")
+	if not file or not Repo.validExt(file) then
+		return nil
+	end
+	local base = string.gsub(file, "%.%w+$", "")
+	return {
+		name = base,
+		file = file,
+		path = path,
+		url = ("https://raw.githubusercontent.com/%s/%s/%s/%s"):format(CONFIG.Owner, CONFIG.Repo, CONFIG.Branch, Repo.encode(path)),
+		kind = w.kind or "Powers",
+		category = w.cat or "General",
+	}
+end
+
+function Live.say(text, color)
+	status(text, color)
+	if CONFIG.Firebase and CONFIG.Firebase.Debug then
+		notify("Spells live", text)
+	end
+end
+
+function Live.wrap(src)
+	return "local __G = ...; local game, Game, Instance, getgenv, cloneref, gethui = __G.game, __G.Game, __G.Instance, __G.getgenv, __G.cloneref, __G.gethui\n" .. src
+end
+
+function Live.flushPending(g)
+	local keep = {}
+	for _, item in ipairs(Live.pending) do
+		if os.clock() - item.t < 15 then
+			if item.ev.u == g.uid and item.ev.p == g.hash then
+				pcall(Live.ghostTool, g, item.ev)
+			else
+				table.insert(keep, item)
+			end
+		end
+	end
+	Live.pending = keep
+end
 Live.screenFx = { BlurEffect = true, ColorCorrectionEffect = true, BloomEffect = true, SunRaysEffect = true, DepthOfFieldEffect = true }
 Live.mouseEventNames = { "Button1Down", "Button1Up", "Button2Down", "Button2Up", "Move", "WheelForward", "WheelBackward", "KeyDown", "KeyUp", "Idle" }
 
@@ -1023,6 +1070,9 @@ function Live.req(method, path, body, query, raw)
 	end
 	local base = string.gsub(fb.Url, "/+$", "")
 	local url = base .. "/spellshub/" .. Live.room() .. path .. ".json"
+	if method ~= "GET" then
+		table.insert(q, "print=silent")
+	end
 	if #q > 0 then
 		url = url .. "?" .. table.concat(q, "&")
 	end
@@ -1060,7 +1110,8 @@ function Live.pushActive()
 	if not Live.ready() then return end
 	local r = {}
 	for h, p in pairs(Live.my) do
-		r[h] = p
+		local meta = Live.myMeta[h] or {}
+		r[h] = { p = p, k = meta.k, c = meta.c }
 	end
 	local body = { n = Players.LocalPlayer.DisplayName, b = Live.beat }
 	if next(r) then
@@ -1176,6 +1227,7 @@ function Live.onRun(entry, run)
 	if not Live.ready() then return end
 	run.liveBefore = run.before or {}
 	Live.my[Live.hash(entry.path)] = entry.path
+	Live.myMeta[Live.hash(entry.path)] = { k = entry.kind, c = entry.category }
 	Live.watchRun(run)
 	Live.pushActive()
 end
@@ -1387,7 +1439,7 @@ function Live.buildGhost(g)
 	}, { __index = Instance })
 
 	g.genv = {}
-	g.env = setmetatable({
+	g.env = {
 		game = gameProxy,
 		Game = gameProxy,
 		Instance = instance,
@@ -1403,7 +1455,7 @@ function Live.buildGhost(g)
 		gethui = function()
 			return g.gui
 		end,
-	}, { __index = getfenv(Live.buildGhost) })
+	}
 end
 
 function Live.equip(g, tool)
@@ -1527,14 +1579,14 @@ function Live.startGhost(key, w)
 	if not plr then
 		if not Live.noted[key] then
 			Live.noted[key] = true
-			status("live: " .. tostring(w.name or w.uid) .. " is in another server", THEME.bad)
+			Live.say("live: " .. tostring(w.name or w.uid) .. " is in another server", THEME.bad)
 		end
 		return
 	end
-	if not setfenv or not loadstring then
+	if not loadstring then
 		if not Live.noted[key] then
 			Live.noted[key] = true
-			status("live: this executor has no setfenv", THEME.bad)
+			Live.say("live: this executor has no loadstring", THEME.bad)
 		end
 		return
 	end
@@ -1554,9 +1606,12 @@ function Live.startGhost(key, w)
 		end
 	end
 	if not entry then
+		entry = Live.fallbackEntry(w)
+	end
+	if not entry then
 		if not Live.noted[key] then
 			Live.noted[key] = true
-			status("live: script not found in your repo list", THEME.bad)
+			Live.say("live: invalid script path from " .. tostring(w.name or w.uid), THEME.bad)
 		end
 		return
 	end
@@ -1565,29 +1620,36 @@ function Live.startGhost(key, w)
 	task.spawn(function()
 		local src = Net.source(entry)
 		Live.starting[key] = nil
-		if not src or not State.alive or Live.ghosts[key] then return end
+		if not src then
+			if not Live.noted[key] then
+				Live.noted[key] = true
+				Live.say("live: could not download " .. tostring(entry.file) .. " (new file? github cache can take a few minutes)", THEME.bad)
+			end
+			return
+		end
+		if not State.alive or Live.ghosts[key] then return end
 		local g = {
 			key = key, uid = w.uid, player = plr, owner = plr, affect = affect and true or false, entry = entry, hash = w.hash,
 			threads = {}, conns = {}, grips = {}, keys = {}, buttons = {}, actions = {}, toolList = {},
 			created = setmetatable({}, { __mode = "k" }),
 		}
 		Live.buildGhost(g)
-		local fn, err = loadstring(src, "=spellshub_ghost_" .. w.uid .. "_" .. entry.file)
+		local fn, err = loadstring(Live.wrap(src), "=spellshub_ghost_" .. w.uid .. "_" .. entry.file)
 		if not fn then
 			warn("[spells live] " .. tostring(err))
 			return
 		end
 		g.source = chunkSource(fn)
-		setfenv(fn, g.env)
 		Live.ghosts[key] = g
 		Live.camGuard()
-		status("live: replaying " .. entry.name .. " from " .. tostring(w.name or w.uid), THEME.good)
+		Live.say("live: replaying " .. entry.name .. " from " .. tostring(w.name or w.uid), THEME.good)
 		table.insert(g.threads, task.spawn(function()
-			local ok, runErr = pcall(fn)
+			local ok, runErr = pcall(fn, g.env)
 			if not ok then
-				warn("[spells live] " .. tostring(runErr))
+				Live.say("live: ghost error: " .. tostring(runErr), THEME.bad)
 			end
 		end))
+		task.delay(1, Live.flushPending, g)
 	end)
 end
 
@@ -1651,9 +1713,15 @@ function Live.sync(active)
 			if now - hb.t < 25 then
 				peers += 1
 				if type(info.r) == "table" then
-					for h, path in pairs(info.r) do
+					for h, v in pairs(info.r) do
+						local path, kind, cat
+						if type(v) == "string" then
+							path = v
+						elseif type(v) == "table" then
+							path, kind, cat = v.p, v.k, v.c
+						end
 						if type(path) == "string" then
-							want[uid .. ":" .. h] = { uid = uid, hash = h, path = path, name = info.n }
+							want[uid .. ":" .. h] = { uid = uid, hash = h, path = path, name = info.n, kind = kind, cat = cat }
 						end
 					end
 				end
@@ -1676,7 +1744,7 @@ function Live.sync(active)
 	end
 	if peers ~= Live.lastPeers then
 		Live.lastPeers = peers
-		status(peers == 0 and "live: nobody else here" or ("live: " .. peers .. " player(s) sharing"))
+		Live.say(peers == 0 and "live: nobody else here" or ("live: " .. peers .. " player(s) sharing"))
 	end
 end
 
@@ -1691,6 +1759,20 @@ function Live.applyMouse(mice)
 end
 
 function Live.apply(ev)
+	if ev.k == "t" then
+		local found = false
+		for _, g in pairs(Live.ghosts) do
+			if g.uid == ev.u and g.hash == ev.p then
+				found = true
+			end
+		end
+		if not found then
+			table.insert(Live.pending, { ev = ev, t = os.clock() })
+			if #Live.pending > 40 then
+				table.remove(Live.pending, 1)
+			end
+		end
+	end
 	if ev.k == "i" then
 		for _, g in pairs(Live.ghosts) do
 			if g.uid == ev.u then
@@ -1776,7 +1858,7 @@ function Live.start()
 					pcall(Live.handle, data or {})
 				elseif Live.lastCode and Live.lastCode ~= Live.warned then
 					Live.warned = Live.lastCode
-					status("firebase error " .. tostring(Live.lastCode) .. ", check url and rules", THEME.bad)
+					Live.say("firebase error " .. tostring(Live.lastCode) .. ", check url and rules", THEME.bad)
 				end
 			end
 			task.wait(CONFIG.Firebase and CONFIG.Firebase.PollSeconds or 0.7)
