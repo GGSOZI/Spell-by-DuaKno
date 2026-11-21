@@ -147,7 +147,7 @@ local State = {
 	spin = nil,
 	binding = false,
 	toggleKey = Enum.KeyCode.RightShift,
-	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, Quiet = true, Debug = false, NoShare = {}, ToggleKey = "RightShift" },
+	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, ImpactPower = 0.5, Quiet = true, Debug = false, NoShare = {}, ToggleKey = "RightShift" },
 }
 
 local Live = { ghosts = {}, starting = {}, my = {}, outbox = {}, sent = {}, seen = {}, hbs = {}, beat = 0, seq = 0, toolOwner = setmetatable({}, { __mode = "k" }) }
@@ -1871,7 +1871,7 @@ function Live.decoyBuild()
 	vf.Force = Vector3.new(0, droot.AssemblyMass * workspace.Gravity, 0)
 	vf.Parent = droot
 
-	local d = { model = model, root = droot, hum = dhum, char = char, conns = {}, orig = {}, applied = {}, parts = {}, born = os.clock() }
+	local d = { model = model, root = droot, hum = dhum, char = char, conns = {}, orig = {}, applied = {}, parts = {}, born = os.clock(), inj = Vector3.zero, push = 0 }
 	for _, part in ipairs(model:GetDescendants()) do
 		if part:IsA("BasePart") then
 			table.insert(d.parts, part)
@@ -1897,18 +1897,51 @@ function Live.decoyBuild()
 			end
 		end
 	end))
-	table.insert(d.conns, RunService.Heartbeat:Connect(function()
+	table.insert(d.conns, RunService.Heartbeat:Connect(function(dt)
 		local rr, rh = Live.realRoot(), Live.realHum()
 		if not rr or not rh or not d.v0 then return end
-		if not droot.Anchored and os.clock() - d.born > 0.4 then
+		local power = math.clamp(State.settings.ImpactPower or 0.5, 0.1, 1)
+		local now = os.clock()
+		if not droot.Anchored and now - d.born > 0.4 then
 			local dv = droot.AssemblyLinearVelocity - d.v0
 			if dv.Magnitude > 2 then
+				dv = dv * power
+				if dv.Magnitude > 45 then
+					dv = dv.Unit * 45
+				end
+				local total = d.inj + dv
+				if total.Magnitude > 70 then
+					total = total.Unit * 70
+					dv = total - d.inj
+				end
 				rr.AssemblyLinearVelocity = rr.AssemblyLinearVelocity + dv
+				d.inj = total
+				d.push = now
 			end
 			local dp = droot.Position - rr.Position
 			if dp.Magnitude > 1.5 then
+				dp = dp * power
+				if dp.Magnitude > 6 then
+					dp = dp.Unit * 6
+				end
 				rr.CFrame = rr.CFrame + dp
 			end
+		end
+		-- the shove fades out on its own once the effect stops pushing, so nothing flies off forever
+		if d.inj.Magnitude > 0.5 then
+			local v = rr.AssemblyLinearVelocity
+			if v.Magnitude < 4 then
+				d.inj = Vector3.zero
+			elseif now - d.push > 0.12 then
+				local cut = d.inj * (1 - 0.88 ^ (dt * 60))
+				rr.AssemblyLinearVelocity = v - cut
+				d.inj = d.inj - cut
+			end
+			if rr.AssemblyLinearVelocity.Magnitude > 140 then
+				rr.AssemblyLinearVelocity = rr.AssemblyLinearVelocity.Unit * 140
+			end
+		else
+			d.inj = Vector3.zero
 		end
 		local frozen = droot.Anchored
 		if frozen ~= (d.frozen or false) then
@@ -3883,6 +3916,12 @@ local function createSettings()
 	end)
 	makeToggle(row("Silence console", "power and weapon print/warn go to the debug panel"), State.settings.Quiet, function(v)
 		State.settings.Quiet = v
+		saveSettings()
+	end)
+	makeSlider(row("Impact strength", "how hard other players' powers push you"), 0.1, 1, State.settings.ImpactPower, 0.05, function(v)
+		return string.format("%d%%", math.floor(v * 100 + 0.5))
+	end, function(v)
+		State.settings.ImpactPower = v
 		saveSettings()
 	end)
 	makeToggle(row("Live debug", "floating panel with live sync status and logs"), State.settings.Debug, function(v)
