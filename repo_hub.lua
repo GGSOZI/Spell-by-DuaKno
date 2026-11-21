@@ -40,6 +40,8 @@ local CONFIG = {
 	OwnerIds = { 8014469067 }, -- DuaKNo's real user id, checked first so it works even offline
 	-- edits are saved to this npoint bin and every player pulls them. make a bin at npoint.io with {} and paste its id
 	Npoint = { BinId = "a58c8d3a0629b499d993", PollSeconds = 15 },
+	-- firebase realtime database that lets players see each other's powers. paste the database url, no trailing slash
+	Firebase = { Url = "https://power-and-tool-default-rtdb.firebaseio.com", Auth = nil, PollSeconds = 0.7, MaxGhosts = 8, MaxPerPlayer = 3 },
 
 	-- folders decide the section first: Repo/Weapons/x.lua -> WEAPONS
 	WeaponFolders = { weapon = true, weapons = true, guns = true, arms = true, arsenal = true },
@@ -145,8 +147,10 @@ local State = {
 	spin = nil,
 	binding = false,
 	toggleKey = Enum.KeyCode.RightShift,
-	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, ToggleKey = "RightShift" },
+	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, ToggleKey = "RightShift" },
 }
+
+local Live = { ghosts = {}, starting = {}, my = {}, outbox = {}, sent = {}, seen = {}, hbs = {}, beat = 0, seq = 0, toolOwner = setmetatable({}, { __mode = "k" }) }
 
 local function track(conn)
 	table.insert(State.connections, conn)
@@ -155,6 +159,7 @@ end
 
 local function cleanup()
 	State.alive = false
+	pcall(Live.shutdown)
 	for _, conn in ipairs(State.connections) do
 		pcall(function() conn:Disconnect() end)
 	end
@@ -864,6 +869,7 @@ end
 
 local function stopRun(run)
 	State.runs[run.entry.path] = nil
+	pcall(Live.onStop, run.entry, run)
 	finalizeRun(run)
 	for _, th in ipairs(run.threads) do
 		pcall(task.cancel, th)
@@ -953,6 +959,7 @@ function Runner.run(entry)
 		finalized = false,
 	}
 	State.runs[entry.path] = run
+	pcall(Live.onRun, entry, run)
 
 	local th = task.spawn(function()
 		local ok, runErr = pcall(fn)
@@ -974,6 +981,800 @@ function Runner.run(entry)
 
 	Runner.busy, Runner.busyPath = false, nil
 	fire()
+end
+
+--// ============================== live (firebase) ==============================
+--// every run is announced to firebase. players running the hub in the same server replay your power on their side
+--// only repo paths travel through firebase, the code always comes from the viewer's own repo scan
+
+Live.screenFx = { BlurEffect = true, ColorCorrectionEffect = true, BloomEffect = true, SunRaysEffect = true, DepthOfFieldEffect = true }
+Live.mouseEventNames = { "Button1Down", "Button1Up", "Button2Down", "Button2Up", "Move", "WheelForward", "WheelBackward", "KeyDown", "KeyUp", "Idle" }
+
+function Live.ready()
+	local fb = CONFIG.Firebase
+	return State.settings.Live == true and fb ~= nil and type(fb.Url) == "string" and fb.Url ~= "" and httpRequest ~= nil
+end
+
+function Live.room()
+	local id = game.JobId
+	if id == nil or id == "" then
+		id = "place" .. tostring(game.PlaceId)
+	end
+	return (string.gsub(id, "[%.%$#%[%]/]", "_"))
+end
+
+function Live.hash(path)
+	return tostring(hashString(path))
+end
+
+function Live.myId()
+	return Players.LocalPlayer.UserId
+end
+
+function Live.req(method, path, body, query, raw)
+	local fb = CONFIG.Firebase
+	local q = {}
+	if fb.Auth then
+		table.insert(q, "auth=" .. HttpService:UrlEncode(fb.Auth))
+	end
+	for _, part in ipairs(query or {}) do
+		table.insert(q, part)
+	end
+	local base = string.gsub(fb.Url, "/+$", "")
+	local url = base .. "/spellshub/" .. Live.room() .. path .. ".json"
+	if #q > 0 then
+		url = url .. "?" .. table.concat(q, "&")
+	end
+	local opts = { Url = url, Method = method, Headers = { ["Content-Type"] = "application/json" } }
+	if raw then
+		opts.Body = raw
+	elseif body ~= nil then
+		opts.Body = HttpService:JSONEncode(body)
+	end
+	local ok, res = pcall(httpRequest, opts)
+	if not ok or type(res) ~= "table" then
+		return false
+	end
+	local code = res.StatusCode
+	if code and code >= 200 and code < 300 then
+		local data
+		if type(res.Body) == "string" and res.Body ~= "" and res.Body ~= "null" then
+			local okd, decoded = pcall(function()
+				return HttpService:JSONDecode(res.Body)
+			end)
+			if okd then
+				data = decoded
+			end
+		end
+		Live.lastCode = nil
+		return true, data
+	end
+	Live.lastCode = code
+	return false
+end
+
+--// ---------- sending (your own powers) ----------
+
+function Live.pushActive()
+	if not Live.ready() then return end
+	local r = {}
+	for h, p in pairs(Live.my) do
+		r[h] = p
+	end
+	local body = { n = Players.LocalPlayer.DisplayName, b = Live.beat }
+	if next(r) then
+		body.r = r
+	end
+	task.spawn(Live.req, "PUT", "/active/" .. Live.myId(), body)
+end
+
+function Live.send(ev)
+	if not Live.ready() or next(Live.my) == nil then return end
+	Live.seq += 1
+	ev.u = Live.myId()
+	local key = string.format("%013d_%d_%d", DateTime.now().UnixTimestampMillis, ev.u, Live.seq)
+	table.insert(Live.outbox, { key = key, ev = ev })
+end
+
+function Live.flush()
+	if #Live.outbox == 0 then return end
+	local batch, keys = {}, {}
+	for _ = 1, math.min(#Live.outbox, 25) do
+		local item = table.remove(Live.outbox, 1)
+		batch[item.key] = item.ev
+		table.insert(keys, item.key)
+	end
+	if Live.req("PATCH", "/events", batch) then
+		local now = os.clock()
+		for _, k in ipairs(keys) do
+			Live.sent[k] = now
+		end
+	end
+end
+
+function Live.prune()
+	local now = os.clock()
+	local parts = {}
+	for k, t in pairs(Live.sent) do
+		if now - t > 30 then
+			table.insert(parts, '"' .. k .. '":null')
+			Live.sent[k] = nil
+		end
+	end
+	if #parts > 0 then
+		Live.req("PATCH", "/events", nil, nil, "{" .. table.concat(parts, ",") .. "}")
+	end
+end
+
+function Live.clearMine()
+	local id = Live.myId()
+	task.spawn(Live.req, "DELETE", "/active/" .. id)
+	task.spawn(Live.req, "DELETE", "/mouse/" .. id)
+end
+
+function Live.sendMouse()
+	if next(Live.my) == nil then return end
+	local ok, pos = pcall(function()
+		return Players.LocalPlayer:GetMouse().Hit.Position
+	end)
+	if not ok or not pos then return end
+	local now = os.clock()
+	if Live.lastMouse and (pos - Live.lastMouse).Magnitude < 1 and now - Live.lastMouseT < 3 then return end
+	Live.lastMouse, Live.lastMouseT = pos, now
+	task.spawn(Live.req, "PUT", "/mouse/" .. Live.myId(), { x = pos.X, y = pos.Y, z = pos.Z })
+end
+
+function Live.onInput(input, processed, d)
+	if next(Live.my) == nil then return end
+	if d == 1 and (processed or UserInputService:GetFocusedTextBox()) then return end
+	local ut = input.UserInputType
+	if ut == Enum.UserInputType.Keyboard then
+		if input.KeyCode == State.toggleKey then return end
+		Live.send({ k = "i", d = d, t = "Keyboard", c = input.KeyCode.Name })
+	elseif ut == Enum.UserInputType.MouseButton1 or ut == Enum.UserInputType.MouseButton2 then
+		Live.send({ k = "i", d = d, t = ut.Name })
+	end
+end
+
+function Live.watchRun(run)
+	run.liveConns = {}
+	local count = 0
+	local hash = Live.hash(run.entry.path)
+	local function register(tool)
+		count += 1
+		local idx = count
+		Live.toolOwner[tool] = true
+		for _, name in ipairs({ "Activated", "Deactivated", "Equipped", "Unequipped" }) do
+			table.insert(run.liveConns, tool[name]:Connect(function()
+				local ok, p = pcall(function()
+					return Players.LocalPlayer:GetMouse().Hit.Position
+				end)
+				p = ok and p or Vector3.zero
+				Live.send({ k = "t", p = hash, i = idx, e = name, x = p.X, y = p.Y, z = p.Z })
+			end))
+		end
+	end
+	task.spawn(function()
+		while State.alive and State.runs[run.entry.path] == run do
+			local lp = Players.LocalPlayer
+			for _, root in ipairs({ lp:FindFirstChildOfClass("Backpack"), lp.Character }) do
+				if root then
+					for _, c in ipairs(root:GetChildren()) do
+						if c:IsA("Tool") and not run.liveBefore[c] and not Live.toolOwner[c] then
+							register(c)
+						end
+					end
+				end
+			end
+			task.wait(0.4)
+		end
+	end)
+end
+
+function Live.onRun(entry, run)
+	if not Live.ready() then return end
+	run.liveBefore = run.before or {}
+	Live.my[Live.hash(entry.path)] = entry.path
+	Live.watchRun(run)
+	Live.pushActive()
+end
+
+function Live.onStop(entry, run)
+	Live.my[Live.hash(entry.path)] = nil
+	for _, c in ipairs(run.liveConns or {}) do
+		pcall(function() c:Disconnect() end)
+	end
+	run.liveConns = nil
+	if next(Live.my) == nil and Live.ready() then
+		task.spawn(Live.req, "DELETE", "/mouse/" .. Live.myId())
+	end
+	Live.pushActive()
+end
+
+--// ---------- ghosts (other players' powers replayed here) ----------
+
+function Live.passthrough(real, overrides, blocked)
+	return setmetatable({}, {
+		__index = function(_, k)
+			local o = overrides[k]
+			if o ~= nil then
+				return o
+			end
+			local v = real[k]
+			if type(v) == "function" then
+				return function(_, ...)
+					return v(real, ...)
+				end
+			end
+			return v
+		end,
+		__newindex = function(_, k, v)
+			if blocked and blocked[k] then return end
+			real[k] = v
+		end,
+		__tostring = function()
+			return tostring(real)
+		end,
+	})
+end
+
+function Live.buildGhost(g)
+	local plr = g.player
+	g.gui = Instance.new("Folder")
+	g.backpack = Instance.new("Folder")
+	g.backpack.Name = "Backpack"
+	g.hit = CFrame.new()
+	g.mouseEvents = {}
+	for _, name in ipairs(Live.mouseEventNames) do
+		g.mouseEvents[name] = Instance.new("BindableEvent")
+	end
+	g.inputBegan = Instance.new("BindableEvent")
+	g.inputEnded = Instance.new("BindableEvent")
+	g.toolCount = 0
+	table.insert(g.conns, g.backpack.ChildAdded:Connect(function(c)
+		if c:IsA("Tool") then
+			g.toolCount += 1
+			g.toolList[g.toolCount] = c
+		end
+	end))
+
+	g.mouse = setmetatable({}, {
+		__index = function(_, k)
+			if g.mouseEvents[k] then
+				return g.mouseEvents[k].Event
+			end
+			if k == "Hit" then
+				return g.hit
+			elseif k == "Origin" then
+				local c = workspace.CurrentCamera
+				return c and c.CFrame or CFrame.new()
+			elseif k == "UnitRay" then
+				local c = workspace.CurrentCamera
+				local from = c and c.CFrame.Position or Vector3.zero
+				local d = g.hit.Position - from
+				return Ray.new(from, d.Magnitude > 0.001 and d.Unit or Vector3.zAxis)
+			elseif k == "X" or k == "Y" then
+				return 0
+			end
+			return nil
+		end,
+		__newindex = function() end,
+	})
+
+	local lpProxy = setmetatable({}, {
+		__index = function(_, k)
+			if k == "GetMouse" then
+				return function()
+					return g.mouse
+				end
+			elseif k == "Backpack" then
+				return g.backpack
+			elseif k == "PlayerGui" then
+				return g.gui
+			elseif k == "FindFirstChild" or k == "FindFirstChildOfClass" or k == "FindFirstChildWhichIsA" or k == "WaitForChild" then
+				return function(_, name, ...)
+					if name == "Backpack" then
+						return g.backpack
+					elseif name == "PlayerGui" then
+						return g.gui
+					end
+					return plr[k](plr, name, ...)
+				end
+			end
+			local v = plr[k]
+			if type(v) == "function" then
+				return function(_, ...)
+					return v(plr, ...)
+				end
+			end
+			return v
+		end,
+		__newindex = function(_, k, v)
+			pcall(function() plr[k] = v end)
+		end,
+		__tostring = function()
+			return plr.Name
+		end,
+	})
+
+	g.players = Live.passthrough(Players, { LocalPlayer = lpProxy })
+
+	g.uis = Live.passthrough(UserInputService, {
+		InputBegan = g.inputBegan.Event,
+		InputEnded = g.inputEnded.Event,
+		IsKeyDown = function(_, code)
+			return g.keys[code] == true
+		end,
+		IsMouseButtonPressed = function(_, t)
+			return g.buttons[t] == true
+		end,
+		GetFocusedTextBox = function()
+			return nil
+		end,
+		GetKeysPressed = function()
+			return {}
+		end,
+		GetMouseLocation = function()
+			local c = workspace.CurrentCamera
+			return c and c.ViewportSize / 2 or Vector2.zero
+		end,
+	}, { MouseBehavior = true, MouseIconEnabled = true })
+
+	g.cas = Live.passthrough(game:GetService("ContextActionService"), {
+		BindAction = function(_, name, fn, _touch, ...)
+			g.actions[name] = { fn = fn, keys = { ... } }
+		end,
+		BindActionAtPriority = function(_, name, fn, _touch, _priority, ...)
+			g.actions[name] = { fn = fn, keys = { ... } }
+		end,
+		UnbindAction = function(_, name)
+			g.actions[name] = nil
+		end,
+		UnbindAllActions = function()
+			table.clear(g.actions)
+		end,
+	})
+
+	local function service(name)
+		if name == "Players" then
+			return g.players
+		elseif name == "UserInputService" then
+			return g.uis
+		elseif name == "ContextActionService" then
+			return g.cas
+		end
+		return game:GetService(name)
+	end
+
+	local gameProxy = setmetatable({}, {
+		__index = function(_, k)
+			if k == "GetService" or k == "service" then
+				return function(_, name)
+					return service(name)
+				end
+			elseif k == "Players" or k == "UserInputService" or k == "ContextActionService" then
+				return service(k)
+			end
+			local v = game[k]
+			if type(v) == "function" then
+				return function(_, ...)
+					return v(game, ...)
+				end
+			end
+			return v
+		end,
+		__newindex = function(_, k, v)
+			game[k] = v
+		end,
+		__tostring = function()
+			return "Game"
+		end,
+	})
+
+	local instance = setmetatable({
+		new = function(class, parent)
+			local inst = Instance.new(class)
+			g.created[inst] = true
+			if Live.screenFx[class] then
+				inst.Enabled = false
+			end
+			if parent ~= nil then
+				inst.Parent = parent
+			end
+			return inst
+		end,
+	}, { __index = Instance })
+
+	g.genv = {}
+	g.env = setmetatable({
+		game = gameProxy,
+		Game = gameProxy,
+		Instance = instance,
+		getgenv = function()
+			return g.genv
+		end,
+		cloneref = function(x)
+			if type(x) == "table" then
+				return x
+			end
+			return cloneref(x)
+		end,
+		gethui = function()
+			return g.gui
+		end,
+	}, { __index = getfenv(Live.buildGhost) })
+end
+
+function Live.equip(g, tool)
+	local char = g.player.Character
+	if not char then return end
+	tool.Parent = char
+	local handle = tool:FindFirstChild("Handle")
+	local hand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+	if handle and hand and not g.grips[tool] then
+		local w = Instance.new("Weld")
+		w.Name = "RightGrip"
+		w.Part0 = hand
+		w.Part1 = handle
+		local att = hand:FindFirstChild("RightGripAttachment")
+		w.C0 = att and att.CFrame or CFrame.new(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0)
+		w.C1 = tool.Grip
+		w.Parent = hand
+		g.grips[tool] = w
+	end
+end
+
+function Live.unequip(g, tool)
+	local w = g.grips[tool]
+	if w then
+		pcall(function() w:Destroy() end)
+		g.grips[tool] = nil
+	end
+	tool.Parent = g.backpack
+end
+
+function Live.fireSignal(sig, arg)
+	if firesignal then
+		pcall(firesignal, sig, arg)
+	elseif getconnections then
+		local ok, list = pcall(getconnections, sig)
+		if ok then
+			for _, c in ipairs(list) do
+				pcall(function() c:Fire(arg) end)
+			end
+		end
+	end
+end
+
+function Live.ghostTool(g, ev)
+	if ev.x then
+		g.hit = CFrame.new(ev.x, ev.y, ev.z)
+	end
+	local tool = g.toolList[ev.i]
+	if not tool or not tool.Parent then return end
+	if ev.e == "Equipped" then
+		Live.equip(g, tool)
+	elseif ev.e == "Unequipped" then
+		Live.unequip(g, tool)
+	end
+	Live.fireSignal(tool[ev.e], ev.e == "Equipped" and g.mouse or nil)
+end
+
+function Live.ghostInput(g, ev)
+	local state = ev.d == 1 and Enum.UserInputState.Begin or Enum.UserInputState.End
+	local kc, ut = Enum.KeyCode.Unknown, Enum.UserInputType[ev.t]
+	if ev.t == "Keyboard" then
+		kc = Enum.KeyCode[ev.c]
+		g.keys[kc] = ev.d == 1 or nil
+	else
+		g.buttons[ut] = ev.d == 1 or nil
+	end
+	local obj = { KeyCode = kc, UserInputType = ut, UserInputState = state, Position = Vector3.zero, Delta = Vector3.zero }
+	;(ev.d == 1 and g.inputBegan or g.inputEnded):Fire(obj, false)
+	if ut == Enum.UserInputType.MouseButton1 then
+		g.mouseEvents[ev.d == 1 and "Button1Down" or "Button1Up"]:Fire()
+	elseif ut == Enum.UserInputType.MouseButton2 then
+		g.mouseEvents[ev.d == 1 and "Button2Down" or "Button2Up"]:Fire()
+	elseif ev.t == "Keyboard" then
+		g.mouseEvents[ev.d == 1 and "KeyDown" or "KeyUp"]:Fire(string.lower(ev.c))
+	end
+	for name, a in pairs(g.actions) do
+		for _, key in ipairs(a.keys) do
+			if key == kc or key == ut then
+				pcall(a.fn, name, state, obj)
+				break
+			end
+		end
+	end
+end
+
+function Live.camGuard()
+	local want = next(Live.ghosts) ~= nil and Runner.count() == 0
+	if want and not Live.guard then
+		Live.guard = true
+		pcall(function()
+			RunService:BindToRenderStep("SpellsHubGhostFovA", Enum.RenderPriority.First.Value, function()
+				local c = workspace.CurrentCamera
+				if c then
+					Live.fov = c.FieldOfView
+				end
+			end)
+			RunService:BindToRenderStep("SpellsHubGhostFovB", Enum.RenderPriority.Last.Value, function()
+				local c = workspace.CurrentCamera
+				if c and Live.fov and Runner.count() == 0 then
+					c.FieldOfView = Live.fov
+				end
+			end)
+		end)
+	elseif not want and Live.guard then
+		Live.guard = false
+		pcall(function() RunService:UnbindFromRenderStep("SpellsHubGhostFovA") end)
+		pcall(function() RunService:UnbindFromRenderStep("SpellsHubGhostFovB") end)
+	end
+end
+
+function Live.startGhost(key, w)
+	local plr = Players:GetPlayerByUserId(w.uid)
+	if not plr or not setfenv or not loadstring then return end
+	local total, mine = 0, 0
+	for _, g in pairs(Live.ghosts) do
+		total += 1
+		if g.uid == w.uid then
+			mine += 1
+		end
+	end
+	if total >= (CONFIG.Firebase.MaxGhosts or 8) or mine >= (CONFIG.Firebase.MaxPerPlayer or 3) then return end
+	local entry
+	for _, e in ipairs(State.entries or {}) do
+		if e.path == w.path then
+			entry = e
+			break
+		end
+	end
+	if not entry then return end
+	Live.starting[key] = true
+	task.spawn(function()
+		local src = Net.source(entry)
+		Live.starting[key] = nil
+		if not src or not State.alive or Live.ghosts[key] then return end
+		local g = {
+			key = key, uid = w.uid, player = plr, entry = entry, hash = w.hash,
+			threads = {}, conns = {}, grips = {}, keys = {}, buttons = {}, actions = {}, toolList = {},
+			created = setmetatable({}, { __mode = "k" }),
+		}
+		Live.buildGhost(g)
+		local fn, err = loadstring(src, "=spellshub_ghost_" .. w.uid .. "_" .. entry.file)
+		if not fn then
+			warn("[spells live] " .. tostring(err))
+			return
+		end
+		g.source = chunkSource(fn)
+		setfenv(fn, g.env)
+		Live.ghosts[key] = g
+		Live.camGuard()
+		table.insert(g.threads, task.spawn(function()
+			local ok, runErr = pcall(fn)
+			if not ok then
+				warn("[spells live] " .. tostring(runErr))
+			end
+		end))
+	end)
+end
+
+function Live.stopGhost(key)
+	local g = Live.ghosts[key]
+	if not g then return end
+	Live.ghosts[key] = nil
+	for name, fn in pairs(g.genv) do
+		local n = string.lower(tostring(name))
+		if type(fn) == "function" and (string.find(n, "cleanup", 1, true) or string.find(n, "clear", 1, true)) then
+			pcall(fn)
+		end
+	end
+	for _, th in ipairs(g.threads) do
+		pcall(task.cancel, th)
+	end
+	killThreads(g.source)
+	killConnections(g.source)
+	for inst in pairs(g.created) do
+		pcall(function() inst:Destroy() end)
+	end
+	for _, w in pairs(g.grips) do
+		pcall(function() w:Destroy() end)
+	end
+	for _, c in ipairs(g.conns) do
+		pcall(function() c:Disconnect() end)
+	end
+	for _, b in pairs(g.mouseEvents) do
+		pcall(function() b:Destroy() end)
+	end
+	for _, inst in ipairs({ g.inputBegan, g.inputEnded, g.backpack, g.gui }) do
+		pcall(function() inst:Destroy() end)
+	end
+	Live.camGuard()
+end
+
+function Live.stopAllGhosts()
+	local keys = {}
+	for key in pairs(Live.ghosts) do
+		table.insert(keys, key)
+	end
+	for _, key in ipairs(keys) do
+		Live.stopGhost(key)
+	end
+end
+
+--// ---------- polling (everyone else) ----------
+
+function Live.sync(active)
+	local me = Live.myId()
+	local now = os.clock()
+	local peers, want = 0, {}
+	for uidStr, info in pairs(active) do
+		local uid = tonumber(uidStr)
+		if uid and uid ~= me and type(info) == "table" then
+			local hb = Live.hbs[uid]
+			if not hb or hb.b ~= info.b then
+				hb = { b = info.b, t = now }
+				Live.hbs[uid] = hb
+			end
+			if now - hb.t < 25 then
+				peers += 1
+				if type(info.r) == "table" then
+					for h, path in pairs(info.r) do
+						if type(path) == "string" then
+							want[uid .. ":" .. h] = { uid = uid, hash = h, path = path }
+						end
+					end
+				end
+			end
+		end
+	end
+	for key, w in pairs(want) do
+		if not Live.ghosts[key] and not Live.starting[key] then
+			Live.startGhost(key, w)
+		end
+	end
+	local stale = {}
+	for key, g in pairs(Live.ghosts) do
+		if not want[key] or not g.player.Parent then
+			table.insert(stale, key)
+		end
+	end
+	for _, key in ipairs(stale) do
+		Live.stopGhost(key)
+	end
+	if peers ~= Live.lastPeers then
+		Live.lastPeers = peers
+		status(peers == 0 and "live: nobody else here" or ("live: " .. peers .. " player(s) sharing"))
+	end
+end
+
+function Live.applyMouse(mice)
+	for _, g in pairs(Live.ghosts) do
+		local m = mice[tostring(g.uid)]
+		if type(m) == "table" and type(m.x) == "number" and type(m.y) == "number" and type(m.z) == "number" then
+			g.hit = CFrame.new(m.x, m.y, m.z)
+			g.mouseEvents.Move:Fire()
+		end
+	end
+end
+
+function Live.apply(ev)
+	if ev.k == "i" then
+		for _, g in pairs(Live.ghosts) do
+			if g.uid == ev.u then
+				pcall(Live.ghostInput, g, ev)
+			end
+		end
+	elseif ev.k == "t" then
+		for _, g in pairs(Live.ghosts) do
+			if g.uid == ev.u and g.hash == ev.p then
+				pcall(Live.ghostTool, g, ev)
+			end
+		end
+	end
+end
+
+function Live.consume(events)
+	local keys = {}
+	for k in pairs(events) do
+		table.insert(keys, k)
+	end
+	table.sort(keys)
+	local first = not Live.primed
+	Live.primed = true
+	local seen = {}
+	local me = Live.myId()
+	for _, k in ipairs(keys) do
+		seen[k] = true
+		if not first and not Live.seen[k] then
+			local ev = events[k]
+			if type(ev) == "table" and ev.u ~= me then
+				Live.apply(ev)
+			end
+		end
+	end
+	Live.seen = seen
+end
+
+function Live.handle(data)
+	Live.sync(type(data.active) == "table" and data.active or {})
+	Live.applyMouse(type(data.mouse) == "table" and data.mouse or {})
+	Live.consume(type(data.events) == "table" and data.events or {})
+end
+
+function Live.setEnabled(v)
+	if v then
+		Live.primed = false
+		for _, run in pairs(State.runs) do
+			pcall(Live.onRun, run.entry, run)
+		end
+	else
+		Live.stopAllGhosts()
+		Live.clearMine()
+		table.clear(Live.my)
+	end
+end
+
+function Live.shutdown()
+	pcall(Live.stopAllGhosts)
+	if CONFIG.Firebase and CONFIG.Firebase.Url ~= "" and httpRequest then
+		pcall(Live.clearMine)
+	end
+	pcall(function() RunService:UnbindFromRenderStep("SpellsHubGhostFovA") end)
+	pcall(function() RunService:UnbindFromRenderStep("SpellsHubGhostFovB") end)
+end
+
+function Live.start()
+	if Live.started then return end
+	Live.started = true
+	track(UserInputService.InputBegan:Connect(function(input, processed)
+		Live.onInput(input, processed, 1)
+	end))
+	track(UserInputService.InputEnded:Connect(function(input, processed)
+		Live.onInput(input, processed, 0)
+	end))
+	if not CONFIG.Firebase or CONFIG.Firebase.Url == "" then
+		warn("[spells live] set CONFIG.Firebase.Url to enable live sync")
+	end
+	task.spawn(function()
+		while State.alive do
+			if Live.ready() then
+				local ok, data = Live.req("GET", "")
+				if ok then
+					pcall(Live.handle, data or {})
+				elseif Live.lastCode and Live.lastCode ~= Live.warned then
+					Live.warned = Live.lastCode
+					status("firebase error " .. tostring(Live.lastCode) .. ", check url and rules", THEME.bad)
+				end
+			end
+			task.wait(CONFIG.Firebase and CONFIG.Firebase.PollSeconds or 0.7)
+		end
+	end)
+	task.spawn(function()
+		local beatT, pruneT, mouseT = 0, 0, 0
+		while State.alive do
+			if Live.ready() then
+				local now = os.clock()
+				Live.flush()
+				if now - mouseT >= 0.15 then
+					mouseT = now
+					Live.sendMouse()
+				end
+				if now - beatT >= 5 then
+					beatT = now
+					Live.beat += 1
+					Live.pushActive()
+				end
+				if now - pruneT >= 10 then
+					pruneT = now
+					Live.prune()
+				end
+			end
+			task.wait(0.15)
+		end
+	end)
 end
 
 --// ============================== icons ==============================
@@ -2412,6 +3213,11 @@ local function createSettings()
 		State.settings.Stack = v
 		saveSettings()
 	end)
+	makeToggle(row("Live sync", "see other players' powers and weapons (firebase)"), State.settings.Live, function(v)
+		State.settings.Live = v
+		saveSettings()
+		Live.setEnabled(v)
+	end)
 	do
 		local r = row("Toggle key", "show or hide the hub")
 		local keyBtn = ghostButton(r, string.upper(State.toggleKey.Name), false)
@@ -2464,6 +3270,7 @@ local function createSettings()
 		end
 		actionButton("RELOAD REPO", 1, false, function()
 			task.spawn(UI.populate)
+	pcall(Live.start)
 		end)
 		actionButton("DISPEL ALL", 2, false, function()
 			Runner.stopAll(false)
