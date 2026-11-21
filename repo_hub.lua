@@ -990,6 +990,27 @@ end
 Live.noted = {}
 Live.pending = {}
 Live.myMeta = {}
+Live.logBuf = {}
+
+function Live.log(text)
+	table.insert(Live.logBuf, tostring(math.floor(os.clock())) .. " " .. tostring(text))
+	if #Live.logBuf > 14 then
+		table.remove(Live.logBuf, 1)
+	end
+	local fb = CONFIG.Firebase
+	if fb and type(fb.Url) == "string" and fb.Url ~= "" and httpRequest then
+		task.spawn(Live.req, "PUT", "/log/" .. Players.LocalPlayer.UserId, Live.logBuf)
+	end
+end
+
+function Live.spawn(fn)
+	task.spawn(function()
+		local ok, err = pcall(fn)
+		if not ok then
+			Live.log("error: " .. tostring(err))
+		end
+	end)
+end
 
 function Live.fallbackEntry(w)
 	local path = w.path
@@ -1012,6 +1033,7 @@ function Live.fallbackEntry(w)
 end
 
 function Live.say(text, color)
+	Live.log(text)
 	status(text, color)
 	if CONFIG.Firebase and CONFIG.Firebase.Debug then
 		notify("Spells live", text)
@@ -1617,7 +1639,7 @@ function Live.startGhost(key, w)
 	end
 	local affect = State.settings.Affect and entry.kind == "Powers" and entry.category ~= "Movement"
 	Live.starting[key] = true
-	task.spawn(function()
+	Live.spawn(function()
 		local src = Net.source(entry)
 		Live.starting[key] = nil
 		if not src then
@@ -1848,6 +1870,10 @@ function Live.start()
 		Live.onInput(input, processed, 0)
 	end))
 	notify("Spells live v3", "starting")
+	local okName, execName = pcall(function()
+		return identifyexecutor and identifyexecutor() or "?"
+	end)
+	Live.log("v3 start ready=" .. tostring(Live.ready()) .. " exec=" .. tostring(okName and execName or "?") .. " http=" .. tostring(httpRequest ~= nil) .. " loadstring=" .. tostring(loadstring ~= nil) .. " job=" .. string.sub(Live.room(), 1, 8) .. " entries=" .. tostring(State.entries and #State.entries or 0))
 	task.spawn(function()
 		while State.alive do
 			if not Live.ready() then
@@ -1862,7 +1888,10 @@ function Live.start()
 						Live.connected = true
 						Live.say("live: connected, room " .. string.sub(Live.room(), 1, 6), THEME.good)
 					end
-					pcall(Live.handle, data or {})
+					local okH, errH = pcall(Live.handle, data or {})
+					if not okH then
+						Live.log("handle error: " .. tostring(errH))
+					end
 				elseif not Live.lastCode and not Live.warnedNil then
 					Live.warnedNil = true
 					Live.say("live: no response from firebase (executor blocks the request?)", THEME.bad)
@@ -1888,6 +1917,18 @@ function Live.start()
 					beatT = now
 					Live.beat += 1
 					Live.pushActive()
+					local gc, mc = 0, 0
+					for _ in pairs(Live.ghosts) do
+						gc += 1
+					end
+					for _ in pairs(Live.my) do
+						mc += 1
+					end
+					local line = "state peers=" .. tostring(Live.lastPeers) .. " ghosts=" .. gc .. " myRuns=" .. mc .. " code=" .. tostring(Live.lastCode)
+					if line ~= Live.lastLine then
+						Live.lastLine = line
+						Live.log(line)
+					end
 				end
 				if now - pruneT >= 10 then
 					pruneT = now
