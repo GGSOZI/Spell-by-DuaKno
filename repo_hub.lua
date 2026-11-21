@@ -999,7 +999,7 @@ function Live.log(text)
 	end
 	local fb = CONFIG.Firebase
 	if fb and type(fb.Url) == "string" and fb.Url ~= "" and httpRequest then
-		task.spawn(Live.req, "PUT", "/log/" .. Players.LocalPlayer.UserId, Live.logBuf)
+		task.spawn(Live.req, "PUT", "!log/" .. Players.LocalPlayer.UserId, Live.logBuf)
 	end
 end
 
@@ -1091,7 +1091,12 @@ function Live.req(method, path, body, query, raw)
 		table.insert(q, part)
 	end
 	local base = string.gsub(fb.Url, "/+$", "")
-	local url = base .. "/spellshub/" .. Live.room() .. path .. ".json"
+	local url
+	if string.sub(path, 1, 1) == "!" then
+		url = base .. "/spellshub/_" .. string.sub(path, 2) .. ".json"
+	else
+		url = base .. "/spellshub/" .. Live.room() .. path .. ".json"
+	end
 	if method ~= "GET" then
 		table.insert(q, "print=silent")
 	end
@@ -1102,7 +1107,13 @@ function Live.req(method, path, body, query, raw)
 	if raw then
 		opts.Body = raw
 	elseif body ~= nil then
-		opts.Body = HttpService:JSONEncode(body)
+		local okE, enc = pcall(function()
+			return HttpService:JSONEncode(body)
+		end)
+		if not okE then
+			return false
+		end
+		opts.Body = enc
 	end
 	local ok, res = pcall(httpRequest, opts)
 	if not ok or type(res) ~= "table" then
@@ -1869,7 +1880,7 @@ function Live.start()
 	track(UserInputService.InputEnded:Connect(function(input, processed)
 		Live.onInput(input, processed, 0)
 	end))
-	notify("Spells live v3", "starting")
+	notify("Spells live v4", "starting")
 	local okName, execName = pcall(function()
 		return identifyexecutor and identifyexecutor() or "?"
 	end)
@@ -1906,6 +1917,7 @@ function Live.start()
 	task.spawn(function()
 		local beatT, pruneT, mouseT = 0, 0, 0
 		while State.alive do
+			local okS, errS = pcall(function()
 			if Live.ready() then
 				local now = os.clock()
 				Live.flush()
@@ -1934,6 +1946,10 @@ function Live.start()
 					pruneT = now
 					Live.prune()
 				end
+			end
+			end)
+			if not okS then
+				Live.log("sender error: " .. tostring(errS))
 			end
 			task.wait(0.15)
 		end
