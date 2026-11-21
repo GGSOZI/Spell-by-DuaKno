@@ -41,7 +41,7 @@ local CONFIG = {
 	-- edits are saved to this npoint bin and every player pulls them. make a bin at npoint.io with {} and paste its id
 	Npoint = { BinId = "a58c8d3a0629b499d993", PollSeconds = 15 },
 	-- firebase realtime database that lets players see each other's powers. paste the database url, no trailing slash
-	Firebase = { Url = "https://power-and-tool-default-rtdb.firebaseio.com", Auth = nil, PollSeconds = 0.5, MaxGhosts = 8, MaxPerPlayer = 3, Debug = true },
+	Firebase = { Url = "https://power-and-tool-default-rtdb.firebaseio.com", Auth = nil, PollSeconds = 0.5, MaxGhosts = 8, MaxPerPlayer = 3, Debug = false },
 
 	-- folders decide the section first: Repo/Weapons/x.lua -> WEAPONS
 	WeaponFolders = { weapon = true, weapons = true, guns = true, arms = true, arsenal = true },
@@ -147,7 +147,7 @@ local State = {
 	spin = nil,
 	binding = false,
 	toggleKey = Enum.KeyCode.RightShift,
-	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Affect = true, ToggleKey = "RightShift" },
+	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, ToggleKey = "RightShift" },
 }
 
 local Live = { ghosts = {}, starting = {}, my = {}, outbox = {}, sent = {}, seen = {}, hbs = {}, beat = 0, seq = 0, toolOwner = setmetatable({}, { __mode = "k" }) }
@@ -988,6 +988,7 @@ end
 --// only repo paths travel through firebase, the code always comes from the viewer's own repo scan
 
 Live.noted = {}
+Live.lastLoud = {}
 Live.pending = {}
 Live.myMeta = {}
 Live.logBuf = {}
@@ -1035,7 +1036,11 @@ end
 function Live.say(text, color)
 	Live.log(text)
 	status(text, color)
-	if CONFIG.Firebase and CONFIG.Firebase.Debug then
+	local now = os.clock()
+	if color == THEME.bad and now - (Live.lastLoud[text] or -99) > 30 then
+		Live.lastLoud[text] = now
+		notify("Spells live", text)
+	elseif CONFIG.Firebase and CONFIG.Firebase.Debug then
 		notify("Spells live", text)
 	end
 end
@@ -1331,15 +1336,31 @@ function Live.buildGhost(g)
 			end
 			if k == "Hit" then
 				return g.hit
-			elseif k == "Origin" then
-				local c = workspace.CurrentCamera
-				return c and c.CFrame or CFrame.new()
-			elseif k == "UnitRay" then
-				local c = workspace.CurrentCamera
-				local from = c and c.CFrame.Position or Vector3.zero
+			elseif k == "Origin" or k == "UnitRay" or k == "Target" or k == "X" or k == "Y" then
+				local oc = g.owner.Character
+				local head = oc and (oc:FindFirstChild("Head") or oc:FindFirstChild("HumanoidRootPart"))
+				local from = head and head.Position or Vector3.zero
 				local d = g.hit.Position - from
-				return Ray.new(from, d.Magnitude > 0.001 and d.Unit or Vector3.zAxis)
-			elseif k == "X" or k == "Y" then
+				local dir = d.Magnitude > 0.001 and d.Unit or Vector3.zAxis
+				if k == "Origin" then
+					return CFrame.new(from, from + dir)
+				elseif k == "UnitRay" then
+					return Ray.new(from, dir)
+				elseif k == "Target" then
+					if d.Magnitude < 0.001 then
+						return nil
+					end
+					local params = RaycastParams.new()
+					params.FilterType = Enum.RaycastFilterType.Exclude
+					params.FilterDescendantsInstances = { oc }
+					local res = workspace:Raycast(from, d * 1.02, params)
+					return res and res.Instance or nil
+				end
+				local c = workspace.CurrentCamera
+				if c then
+					local v = c:WorldToViewportPoint(g.hit.Position)
+					return k == "X" and v.X or v.Y
+				end
 				return 0
 			end
 			return nil
@@ -1495,6 +1516,12 @@ function Live.equip(g, tool)
 	local char = g.player.Character
 	if not char then return end
 	tool.Parent = char
+	for _, p in ipairs(tool:GetDescendants()) do
+		if p:IsA("BasePart") then
+			p.CanCollide = false
+			p.Massless = true
+		end
+	end
 	local handle = tool:FindFirstChild("Handle")
 	local hand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
 	if handle and hand and not g.grips[tool] then
@@ -1507,6 +1534,12 @@ function Live.equip(g, tool)
 		w.C1 = tool.Grip
 		w.Parent = hand
 		g.grips[tool] = w
+		handle.Anchored = false
+		table.insert(g.conns, tool:GetPropertyChangedSignal("Grip"):Connect(function()
+			if w.Parent then
+				w.C1 = tool.Grip
+			end
+		end))
 	end
 end
 
@@ -1612,7 +1645,7 @@ function Live.startGhost(key, w)
 	if not plr then
 		if not Live.noted[key] then
 			Live.noted[key] = true
-			Live.say("live: " .. tostring(w.name or w.uid) .. " is in another server", THEME.bad)
+			Live.say("live: " .. tostring(w.name or w.uid) .. " is in another server")
 		end
 		return
 	end
@@ -1648,7 +1681,7 @@ function Live.startGhost(key, w)
 		end
 		return
 	end
-	local affect = State.settings.Affect and entry.kind == "Powers" and entry.category ~= "Movement"
+	local affect = false
 	Live.starting[key] = true
 	Live.spawn(function()
 		local src = Net.source(entry)
@@ -1675,6 +1708,7 @@ function Live.startGhost(key, w)
 		g.source = chunkSource(fn)
 		Live.ghosts[key] = g
 		Live.camGuard()
+		Live.decoyCheck()
 		Live.say("live: replaying " .. entry.name .. " from " .. tostring(w.name or w.uid), THEME.good)
 		table.insert(g.threads, task.spawn(function()
 			local ok, runErr = pcall(fn, g.env)
@@ -1717,6 +1751,165 @@ function Live.stopGhost(key)
 		pcall(function() inst:Destroy() end)
 	end
 	Live.camGuard()
+	Live.decoyCheck()
+end
+
+--// ---------- decoy: you show up as an npc double, scripts hit the double, only the effect reaches you (no damage) ----------
+
+Live.decoyFields = { "WalkSpeed", "JumpPower", "JumpHeight", "PlatformStand" }
+
+function Live.realRoot()
+	local c = Players.LocalPlayer.Character
+	return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+function Live.realHum()
+	local c = Players.LocalPlayer.Character
+	return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+function Live.decoyStop()
+	local d = Live.decoy
+	if not d then return end
+	Live.decoy = nil
+	for _, c in ipairs(d.conns) do
+		pcall(function() c:Disconnect() end)
+	end
+	local rh, rr = Live.realHum(), Live.realRoot()
+	if rh then
+		for f, orig in pairs(d.orig) do
+			pcall(function() rh[f] = orig end)
+		end
+	end
+	if rr and d.frozen then
+		pcall(function() rr.Anchored = false end)
+	end
+	pcall(function() d.model:Destroy() end)
+end
+
+function Live.decoyBuild()
+	local char = Players.LocalPlayer.Character
+	local root, hum = Live.realRoot(), Live.realHum()
+	if not char or not root or not hum or hum.Health <= 0 then return end
+	local was = char.Archivable
+	char.Archivable = true
+	local ok, model = pcall(function()
+		return char:Clone()
+	end)
+	char.Archivable = was
+	if not ok or not model then return end
+	model.Name = "SpellsDecoy"
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BaseScript") or d:IsA("Tool") or d:IsA("Sound") or d:IsA("ParticleEmitter") or d:IsA("BillboardGui") or d:IsA("Highlight") or d:IsA("ForceField") then
+			pcall(function() d:Destroy() end)
+		end
+	end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.Transparency = 1
+			d.CanCollide = false
+		elseif d:IsA("Decal") or d:IsA("Texture") then
+			d.Transparency = 1
+		end
+	end
+	local droot = model:FindFirstChild("HumanoidRootPart")
+	local dhum = model:FindFirstChildOfClass("Humanoid")
+	if not droot or not dhum then
+		model:Destroy()
+		return
+	end
+	pcall(function()
+		dhum.EvaluateStateMachine = false
+		dhum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	end)
+	model.Parent = workspace
+	local att = Instance.new("Attachment")
+	att.Parent = droot
+	local vf = Instance.new("VectorForce")
+	vf.Attachment0 = att
+	vf.RelativeTo = Enum.ActuatorRelativeTo.World
+	vf.ApplyAtCenterOfMass = true
+	vf.Force = Vector3.new(0, droot.AssemblyMass * workspace.Gravity, 0)
+	vf.Parent = droot
+
+	local d = { model = model, root = droot, hum = dhum, char = char, conns = {}, orig = {}, applied = {} }
+	Live.decoy = d
+	table.insert(d.conns, RunService.Stepped:Connect(function()
+		local rr, rh = Live.realRoot(), Live.realHum()
+		if not rr or not rh or Players.LocalPlayer.Character ~= d.char or not model.Parent then
+			Live.decoyBroken = true
+			return
+		end
+		droot.CFrame = rr.CFrame
+		droot.AssemblyLinearVelocity = rr.AssemblyLinearVelocity
+		droot.AssemblyAngularVelocity = Vector3.zero
+		d.v0 = rr.AssemblyLinearVelocity
+		for _, f in ipairs(Live.decoyFields) do
+			if d.applied[f] == nil then
+				pcall(function() dhum[f] = rh[f] end)
+			end
+		end
+	end))
+	table.insert(d.conns, RunService.Heartbeat:Connect(function()
+		local rr, rh = Live.realRoot(), Live.realHum()
+		if not rr or not rh or not d.v0 then return end
+		if not droot.Anchored then
+			local dv = droot.AssemblyLinearVelocity - d.v0
+			if dv.Magnitude > 2 then
+				rr.AssemblyLinearVelocity = rr.AssemblyLinearVelocity + dv
+			end
+			local dp = droot.Position - rr.Position
+			if dp.Magnitude > 1.5 then
+				rr.CFrame = rr.CFrame + dp
+			end
+		end
+		local frozen = droot.Anchored
+		if frozen ~= (d.frozen or false) then
+			d.frozen = frozen
+			rr.Anchored = frozen
+		end
+		for _, f in ipairs(Live.decoyFields) do
+			local mine, real = dhum[f], rh[f]
+			if d.applied[f] == nil then
+				if mine ~= real then
+					d.orig[f] = real
+					d.applied[f] = true
+					rh[f] = mine
+				end
+			elseif mine == d.orig[f] then
+				rh[f] = d.orig[f]
+				d.applied[f] = nil
+				d.orig[f] = nil
+			else
+				rh[f] = mine
+			end
+		end
+	end))
+end
+
+function Live.decoyCheck()
+	local want = State.settings.Impact == true and next(Live.ghosts) ~= nil
+	if not want then
+		Live.decoyStop()
+		return
+	end
+	if Live.decoy and (Live.decoyBroken or not Live.decoy.model.Parent) then
+		Live.decoyStop()
+		Live.decoyBroken = nil
+	end
+	if not Live.decoy then
+		Live.decoyBuild()
+	end
+	if not Live.decoyWatch then
+		Live.decoyWatch = true
+		task.spawn(function()
+			while State.alive and next(Live.ghosts) ~= nil and State.settings.Impact do
+				task.wait(1)
+				Live.decoyCheck()
+			end
+			Live.decoyWatch = false
+		end)
+	end
 end
 
 function Live.stopAllGhosts()
@@ -1864,6 +2057,7 @@ end
 
 function Live.shutdown()
 	pcall(Live.stopAllGhosts)
+	pcall(Live.decoyStop)
 	if CONFIG.Firebase and CONFIG.Firebase.Url ~= "" and httpRequest then
 		pcall(Live.clearMine)
 	end
@@ -1880,7 +2074,6 @@ function Live.start()
 	track(UserInputService.InputEnded:Connect(function(input, processed)
 		Live.onInput(input, processed, 0)
 	end))
-	notify("Spells live v5", "starting")
 	local okName, execName = pcall(function()
 		return identifyexecutor and identifyexecutor() or "?"
 	end)
@@ -3397,9 +3590,10 @@ local function createSettings()
 		saveSettings()
 		Live.setEnabled(v)
 	end)
-	makeToggle(row("Powers affect me", "other players' powers hit you too (pull, push, effects)"), State.settings.Affect, function(v)
-		State.settings.Affect = v
+	makeToggle(row("Receive effects", "other players' powers push or freeze you, no damage"), State.settings.Impact, function(v)
+		State.settings.Impact = v
 		saveSettings()
+		Live.decoyCheck()
 	end)
 	do
 		local r = row("Toggle key", "show or hide the hub")
