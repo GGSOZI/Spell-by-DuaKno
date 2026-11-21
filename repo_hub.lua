@@ -1088,7 +1088,7 @@ function Live.say(text, color)
 end
 
 function Live.wrap(src)
-	return "local __G = ...; local game, Game, Instance, getgenv, cloneref, gethui, workspace, Workspace, print, warn = __G.game, __G.Game, __G.Instance, __G.getgenv, __G.cloneref, __G.gethui, __G.workspace, __G.Workspace, __G.print, __G.warn\n" .. src
+	return "local __G = ...; local game, Game, Instance, getgenv, cloneref, gethui, print, warn = __G.game, __G.Game, __G.Instance, __G.getgenv, __G.cloneref, __G.gethui, __G.print, __G.warn\n" .. src
 end
 
 function Live.flushPending(g)
@@ -1478,88 +1478,6 @@ function Live.buildGhost(g)
 
 	g.players = Live.passthrough(Players, { LocalPlayer = lpProxy })
 
-	local camOver = setmetatable({}, {
-		__index = function(_, k)
-			if k == "CFrame" or k == "CoordinateFrame" then
-				local oc = g.owner.Character
-				local head = oc and (oc:FindFirstChild("Head") or oc:FindFirstChild("HumanoidRootPart"))
-				if not head then return nil end
-				if (g.hit.Position - head.Position).Magnitude > 0.001 then
-					return CFrame.lookAt(head.Position, g.hit.Position)
-				end
-				return head.CFrame
-			end
-			return nil
-		end,
-	})
-	local realCam = function() return workspace.CurrentCamera end
-	g.camera = setmetatable({}, {
-		__index = function(_, k)
-			local o = camOver[k]
-			if o ~= nil then return o end
-			local c = realCam()
-			if not c then return nil end
-			local v = c[k]
-			if type(v) == "function" then
-				return function(_, ...) return v(c, ...) end
-			end
-			return v
-		end,
-		__newindex = function(_, k, v)
-			if k == "CFrame" or k == "FieldOfView" or k == "CameraType" or k == "CameraSubject" or k == "Focus" or k == "CoordinateFrame" then return end
-			local c = realCam()
-			if c then c[k] = v end
-		end,
-	})
-	g.workspace = setmetatable({}, {
-		__index = function(_, k)
-			if k == "CurrentCamera" or k == "Camera" then return g.camera end
-			local v = workspace[k]
-			if type(v) == "function" then
-				return function(_, ...) return v(workspace, ...) end
-			end
-			return v
-		end,
-		__newindex = function(_, k, v) workspace[k] = v end,
-		__tostring = function() return "Workspace" end,
-	})
-
-	g.uis = Live.passthrough(UserInputService, {
-		InputBegan = g.inputBegan.Event,
-		InputEnded = g.inputEnded.Event,
-		IsKeyDown = function(_, code)
-			return g.keys[code] == true
-		end,
-		IsMouseButtonPressed = function(_, t)
-			return g.buttons[t] == true
-		end,
-		GetFocusedTextBox = function()
-			return nil
-		end,
-		GetKeysPressed = function()
-			return {}
-		end,
-		GetMouseLocation = function()
-			local c = workspace.CurrentCamera
-			return c and c.ViewportSize / 2 or Vector2.zero
-		end,
-	}, { MouseBehavior = true, MouseIconEnabled = true })
-
-	g.cas = Live.passthrough(game:GetService("ContextActionService"), {
-		BindAction = function(_, name, fn, _touch, ...)
-			g.actions[name] = { fn = fn, keys = { ... } }
-		end,
-		BindActionAtPriority = function(_, name, fn, _touch, _priority, ...)
-			g.actions[name] = { fn = fn, keys = { ... } }
-		end,
-		UnbindAction = function(_, name)
-			g.actions[name] = nil
-		end,
-		UnbindAllActions = function()
-			table.clear(g.actions)
-		end,
-	})
-
 	local function service(name)
 		if name == "Players" then
 			return g.players
@@ -1567,8 +1485,6 @@ function Live.buildGhost(g)
 			return g.uis
 		elseif name == "ContextActionService" then
 			return g.cas
-		elseif name == "Workspace" then
-			return g.workspace
 		end
 		return game:GetService(name)
 	end
@@ -1579,7 +1495,7 @@ function Live.buildGhost(g)
 				return function(_, name)
 					return service(name)
 				end
-			elseif k == "Players" or k == "UserInputService" or k == "ContextActionService" or k == "Workspace" then
+			elseif k == "Players" or k == "UserInputService" or k == "ContextActionService" then
 				return service(k)
 			end
 			local v = game[k]
@@ -1619,8 +1535,6 @@ function Live.buildGhost(g)
 		warn = gw,
 		game = gameProxy,
 		Game = gameProxy,
-		workspace = g.workspace,
-		Workspace = g.workspace,
 		Instance = instance,
 		getgenv = function()
 			return g.genv
