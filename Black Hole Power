@@ -1,0 +1,1078 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Debris = game:GetService("Debris")
+local SoundService = game:GetService("SoundService")
+local Lighting = game:GetService("Lighting")
+local lp = Players.LocalPlayer
+local U = {}
+local mouse = lp:GetMouse()
+
+local CONFIG = {
+	Duration = 10,
+	Cooldown = 5,
+	StartDiameter = 6,
+	EndDiameter = 45,
+	HeightAbove = 25,
+	RangeBase = 25,
+	RangePerDiameter = 3.5,
+	PullMin = 60,
+	PullMax = 420,
+	MaxSpeedMin = 70,
+	MaxSpeedMax = 190,
+	Swirl = 0.5,
+	BlastPower = 230,
+	KillRangeMult = 1.3,
+	ParticleScale = 3,
+	PullPlayer = true,
+	PlayerPullMult = 0.7,
+	PlayerSwirl = 0,
+	PlayerMaxSpeed = 55,
+	PlayerBlast = 60,
+	PlayerBlastUp = 35,
+	DistortRangeMult = 1.2,
+	ShakeMax = 0.5,
+	FovMax = 8,
+	CamPull = 0,
+	CamRoll = 0,
+	BendRangeMult = 1.2,
+	BendPull = 0.18,
+	BendSwirl = 0.45,
+	BendTilt = 0.35,
+	BendTwist = 0.25,
+	BendRipple = 0.4,
+	BendRadial = 0.2,
+	BendTangent = 0.3,
+	BendMaxPartSize = 80,
+	BendMaxEntities = 90,
+	BendMaxParts = 300,
+	BendNewPerTick = 10,
+	Lens = false,
+	LensScale = 2.4,
+	LensTransparency = 0.88,
+	ExplodeShake = 1,
+	Sounds = {
+		Launch = 136676558602030,
+		Active = 136203348758226,
+		Explode = 135238586496771,
+	},
+}
+
+local env = (getgenv and getgenv()) or _G
+if env.BlackHoleCleanup then
+	pcall(env.BlackHoleCleanup)
+end
+
+local busy = false
+
+local DECAL_LTM = false
+do
+	local ok, d = pcall(Instance.new, "Decal")
+	if ok and d then
+		DECAL_LTM = pcall(function() return d.LocalTransparencyModifier end)
+		d:Destroy()
+	end
+end
+
+function U.claimOwnership()
+	pcall(function() sethiddenproperty(lp, "SimulationRadius", math.huge) end)
+	pcall(function() sethiddenproperty(lp, "MaximumSimulationRadius", math.huge) end)
+	pcall(function() lp.MaximumSimulationRadius = math.huge end)
+	pcall(function() settings().Physics.AllowSleep = false end)
+end
+
+function U.NS(list, scale)
+	scale = scale or 1
+	local kps = {}
+	for _, k in ipairs(list) do
+		kps[#kps + 1] = NumberSequenceKeypoint.new(k[1], k[2] * scale, (k[3] or 0) * scale)
+	end
+	return NumberSequence.new(kps)
+end
+
+local BLACK = Color3.new(0, 0, 0)
+local WHITE = Color3.new(1, 1, 1)
+local DARKRED = Color3.new(0.478431, 0, 0)
+local RED = Color3.new(0.498039, 0.0431373, 0.0588235)
+
+local DEFS = {
+	Absorb2 = { tex = "rbxassetid://15784489475", rate = 400, life = {0.05, 0.1}, speed = {0.0988, 0.0988}, size = {{0, 80}, {0.5, 57.4388}, {1, 5}}, color = BLACK, transp = {{0, 1}, {1, 0}}, rot = {-360, 360}, spread = 360, drag = 0, dir = Enum.NormalId.Top, lightEm = -2, lightInf = 0, zoff = 0, orient = Enum.ParticleOrientation.VelocityPerpendicular, flip = Enum.ParticleFlipbookLayout.Grid2x2, flipMode = Enum.ParticleFlipbookMode.OneShot, bright = 30, cs = 0.5, continuous = true },
+	Absorb = { tex = "rbxassetid://10357935135", rate = 100, life = {0.05, 0.1}, speed = {0.0047, 0.0047}, size = {{0, 50}, {0.333, 33.3333}, {0.667, 16.6667}, {1, 0}}, color = BLACK, transp = {{0, 1}, {0.0923, 0.8375}, {0.1824, 0.7}, {0.3226, 0.2875}, {0.5597, 0}, {1, 0}}, rot = {-360, 360}, spread = 0, drag = 0, dir = Enum.NormalId.Top, lightEm = -2, lightInf = 0, zoff = 0, orient = Enum.ParticleOrientation.FacingCamera, bright = 30, locked = true, cs = 0.5, continuous = true },
+	External = { tex = "rbxassetid://12911962998", rate = 100, life = {0.15, 0.15}, speed = {0.001, 0.001}, size = {{0, 40}, {0.4159, 34.3067}, {0.6999, 23.9067}, {1, 0}}, color = BLACK, transp = {{0, 0}, {1, 0}}, rot = {0, 360}, spread = 0, drag = 4.5, dir = Enum.NormalId.Bottom, lightEm = 0, lightInf = 0, zoff = 15, orient = Enum.ParticleOrientation.FacingCamera, squash = {{0, 0}, {0.1788, -0.4588}, {0.3173, 0.0353}, {0.4821, 0, 2.08235}, {0.6159, 0.2118, 1.02353}, {1, 0}}, bright = 1, cs = 0.6, continuous = true },
+	Shockwave = { tex = "rbxassetid://12911962998", rate = 40, life = {0.15, 0.15}, speed = {0.001, 0.001}, size = {{0, 128.179}, {0.3039, 122.325}, {0.5599, 109.935}, {0.7359, 88.1443}, {1, 0}}, color = WHITE, transp = {{0, 1}, {1, 0.85}}, rot = {0, 360}, spread = 360, drag = 4.5, dir = Enum.NormalId.Bottom, lightEm = 1, lightInf = 0, zoff = -15, orient = Enum.ParticleOrientation.VelocityPerpendicular, bright = 1, cs = 0.35, continuous = true },
+	BlackDust = { tex = "rbxassetid://16101308455", rate = 20, life = {0.5, 1}, speed = {1, 1}, size = {{0, 1}, {1, 2}}, color = Color3.new(0.0667, 0.0667, 0.0667), transp = {{0, 0.75}, {1, 0.75}}, rot = {-180, 180}, spread = 360, drag = 0, dir = Enum.NormalId.Top, lightEm = 0, lightInf = 1, zoff = 0.1, orient = Enum.ParticleOrientation.FacingCamera, accel = Vector3.new(0, -2, 0), shape = Enum.ParticleEmitterShape.Sphere, flip = Enum.ParticleFlipbookLayout.Grid4x4, flipMode = Enum.ParticleFlipbookMode.OneShot, bright = 1, cs = 3, continuous = true },
+	BrightLightning = { tex = "rbxassetid://17571701210", rate = 586, life = {0.0213, 0.2984}, speed = {0.0342, 0.0342}, size = {{0, 24.4523, 8.15078}, {1, 24.4523, 8.15078}}, color = DARKRED, transp = {{0, 0}, {1, 0}}, rot = {-360, 360}, spread = 360, drag = 16.4201, dir = Enum.NormalId.Left, lightEm = -2, lightInf = 0.2, zoff = 0.5, orient = Enum.ParticleOrientation.VelocityPerpendicular, flip = Enum.ParticleFlipbookLayout.Grid4x4, flipMode = Enum.ParticleFlipbookMode.OneShot, flipFps = 2.34573, bright = 25, cs = 0.7 },
+	BrightLightning2 = { tex = "rbxassetid://103790628162800", rate = 586, life = {0.0213, 0.2984}, speed = {0.0342, 0.0342}, size = {{0, 24.4523, 8.15078}, {1, 24.4523, 8.15078}}, color = DARKRED, transp = {{0, 0}, {1, 0}}, rot = {-360, 360}, spread = 360, drag = 16.4201, dir = Enum.NormalId.Left, lightEm = -2, lightInf = 0.2, zoff = 0.5, orient = Enum.ParticleOrientation.VelocityPerpendicular, flip = Enum.ParticleFlipbookLayout.Grid4x4, flipMode = Enum.ParticleFlipbookMode.OneShot, flipFps = 2.34573, bright = 25, cs = 0.7 },
+	C1 = { tex = "rbxassetid://127940423551603", rate = 34.1159, life = {0.0733, 0.7328}, speed = {4.64244, 23.2122}, size = {{0, 0}, {0.5, 14.5871, 3.40196}, {1, 17.0098, 6.80392}}, color = RED, transp = {{0, 0}, {1, 1}}, rot = {-360, 360}, spread = 360, drag = 3.59816, dir = Enum.NormalId.Back, lightEm = 0, lightInf = 0, zoff = 0, orient = Enum.ParticleOrientation.VelocityPerpendicular, flip = Enum.ParticleFlipbookLayout.Grid4x4, flipMode = Enum.ParticleFlipbookMode.OneShot, flipFps = 1.12443, bright = 5, cs = 0.8 },
+	C2 = { tex = "rbxassetid://127940423551603", rate = 34.1159, life = {0.0733, 0.8794}, speed = {1.30282, 4.91689}, size = {{0, 0}, {0.5, 6.24303}, {1, 7.01557}}, color = RED, transp = {{0, 0}, {1, 1}}, rot = {-360, 360}, rotSpeed = {-136.464, 0}, spread = 360, drag = 3.59816, dir = Enum.NormalId.Back, lightEm = 0, lightInf = 0, zoff = 0, orient = Enum.ParticleOrientation.VelocityPerpendicular, flip = Enum.ParticleFlipbookLayout.Grid4x4, flipMode = Enum.ParticleFlipbookMode.OneShot, flipFps = 1.12443, bright = 5, cs = 0.8 },
+	Colkor = { tex = "rbxassetid://137416735845328", rate = 34.1159, life = {0.0733, 0.2931}, speed = {0.0006, 0.0006}, size = {{0, 0}, {0.1, 11.2078}, {0.5, 16.8078}, {1, 17.9814}}, color = RED, transp = {{0, 0}, {1, 0}}, rot = {-360, 360}, spread = 360, drag = 3.59816, dir = Enum.NormalId.Top, lightEm = 0, lightInf = 0, zoff = 0, orient = Enum.ParticleOrientation.VelocityPerpendicular, flip = Enum.ParticleFlipbookLayout.Grid4x4, flipMode = Enum.ParticleFlipbookMode.OneShot, flipFps = 1.12443, bright = 5, cs = 0.9 },
+	BlackShockwave = { tex = "rbxassetid://125599001294511", rate = 2.16421, life = {0.1595, 0.1595}, speed = {0.0135, 0.0135}, size = {{0, 0, 24.6301}, {0.1, 26.2575, 24.6301}, {0.3, 46.3809, 24.6301}, {0.6, 52.1532, 24.6301}, {1, 52.7787, 24.6301}}, color = BLACK, transp = {{0, 0}, {0.1, 0.1602}, {0.3, 0.453}, {0.5, 0.7008}, {0.7, 0.8884}, {0.9, 0.9903}, {1, 1}}, rot = {-360, 360}, spread = 360, drag = 0, dir = Enum.NormalId.Front, lightEm = 0, lightInf = 0, zoff = 1, orient = Enum.ParticleOrientation.VelocityPerpendicular, flipMode = Enum.ParticleFlipbookMode.OneShot, flipFps = 2.16421, bright = 0.3, cs = 1.4 },
+	BlackShockwave2 = { tex = "rbxassetid://125599001294511", rate = 2.16421, life = {0.15, 0.25}, speed = {0.0076, 0.0076}, size = {{0, 0, 13.8544}, {0.1, 14.7699, 13.8544}, {0.3, 26.0893, 13.8544}, {0.6, 29.3362, 13.8544}, {1, 29.688, 13.8544}}, color = BLACK, transp = {{0, 0}, {0.1, 0.1602}, {0.3, 0.453}, {0.5, 0.7008}, {0.7, 0.8884}, {0.9, 0.9903}, {1, 1}}, rot = {-360, 360}, spread = 360, drag = 0, dir = Enum.NormalId.Front, lightEm = 0, lightInf = 0, zoff = 0, orient = Enum.ParticleOrientation.VelocityPerpendicular, flipMode = Enum.ParticleFlipbookMode.OneShot, flipFps = 2.16421, bright = 0.3, cs = 1.4 },
+	Blast = { tex = "rbxassetid://7994629137", rate = 100, life = {0.1, 0.1}, speed = {0.1, 0.1}, size = {{0, 10}, {1, 38.0297}}, color = Color3.new(1, 0, 0), transp = {{0, 0}, {1, 0}}, rot = {-360, 360}, spread = 360, drag = 0, dir = Enum.NormalId.Front, lightEm = 1, lightInf = 1, zoff = 0, orient = Enum.ParticleOrientation.VelocityParallel, squash = {{0, -3}, {1, 2.5125}}, bright = 1, cs = 1.2 },
+	BlackFlashWind = { tex = "rbxassetid://9293225960", rate = 50, life = {0.2, 0.7}, speed = {0.1, 100}, size = {{0, 0}, {0.0346, 3.14184, 3.47677}, {0.1466, 6.48456, 3.7846}, {0.3046, 9.21079, 3.48412}, {0.6066, 11.5963, 2.77942}, {1, 13.2263, 2.75702}}, color = WHITE, transp = {{0, 0.9}, {1, 1}}, rot = {-360, 360}, rotSpeed = {-200, 200}, spread = 360, drag = 10, dir = Enum.NormalId.Front, lightEm = 1, lightInf = 1, zoff = 2, orient = Enum.ParticleOrientation.VelocityPerpendicular, flip = Enum.ParticleFlipbookLayout.Grid2x2, flipMode = Enum.ParticleFlipbookMode.OneShot, bright = 1, cs = 1.3 },
+}
+
+function U.buildEmitter(name, parent)
+	local d = DEFS[name]
+	local e = Instance.new("ParticleEmitter")
+	e.Name = name
+	e.Enabled = false
+	local function set(prop, val)
+		pcall(function() e[prop] = val end)
+	end
+	set("Texture", d.tex)
+	set("Rate", d.rate)
+	set("Lifetime", NumberRange.new(d.life[1], d.life[2]))
+	set("Speed", NumberRange.new(d.speed[1], d.speed[2]))
+	set("Color", ColorSequence.new(d.color))
+	set("Transparency", U.NS(d.transp))
+	set("Rotation", NumberRange.new(d.rot[1], d.rot[2]))
+	local rs = d.rotSpeed or {0, 0}
+	set("RotSpeed", NumberRange.new(rs[1], rs[2]))
+	set("SpreadAngle", Vector2.new(d.spread, d.spread))
+	set("Acceleration", d.accel or Vector3.zero)
+	set("Drag", d.drag)
+	set("EmissionDirection", d.dir)
+	set("LightEmission", d.lightEm)
+	set("LightInfluence", d.lightInf)
+	set("LockedToPart", d.locked or false)
+	set("ZOffset", d.zoff)
+	set("Orientation", d.orient)
+	set("Squash", U.NS(d.squash or {{0, 0}, {1, 0}}))
+	set("Shape", d.shape or Enum.ParticleEmitterShape.Box)
+	set("FlipbookLayout", d.flip or Enum.ParticleFlipbookLayout.None)
+	set("FlipbookMode", d.flipMode or Enum.ParticleFlipbookMode.Loop)
+	set("FlipbookFramerate", NumberRange.new(d.flipFps or 1, d.flipFps or 1))
+	set("Brightness", d.bright)
+	set("Size", U.NS(d.size, 0.3 * CONFIG.ParticleScale * (d.cs or 1)))
+	e.Parent = parent
+	return e
+end
+
+local overlap = OverlapParams.new()
+overlap.FilterType = Enum.RaycastFilterType.Exclude
+overlap.MaxParts = 1500
+
+function U.getNpc(part)
+	local m = part:FindFirstAncestorOfClass("Model")
+	while m do
+		if m:FindFirstChildOfClass("Humanoid") then
+			if Players:GetPlayerFromCharacter(m) then
+				return nil, true
+			end
+			return m, false
+		end
+		m = m.Parent and m.Parent:FindFirstAncestorOfClass("Model")
+	end
+	return nil, false
+end
+
+function U.setFilter(folder)
+	local f = {folder}
+	if lp.Character then
+		f[#f + 1] = lp.Character
+	end
+	overlap.FilterDescendantsInstances = f
+end
+
+function U.shake(power)
+	local char = lp.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hum then
+		return
+	end
+	if power <= 0.02 then
+		hum.CameraOffset = Vector3.zero
+		return
+	end
+	task.spawn(function()
+		local t = os.clock()
+		while os.clock() - t < 0.7 do
+			local fade = 1 - (os.clock() - t) / 0.7
+			hum.CameraOffset = Vector3.new((math.random() - 0.5) * power * fade, (math.random() - 0.5) * power * fade, 0)
+			RunService.RenderStepped:Wait()
+		end
+		hum.CameraOffset = Vector3.zero
+	end)
+end
+
+function U.killNpc(model, hp)
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if hum then
+		pcall(function() hum.PlatformStand = false end)
+		pcall(function() hum.Health = 0 end)
+		pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
+	end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("Motor6D") and (d.Name == "Neck" or d.Name == "Root" or d.Name == "RootJoint") then
+			pcall(function() d:Destroy() end)
+		end
+	end
+	pcall(function() model:BreakJoints() end)
+	for _, p in ipairs(model:GetDescendants()) do
+		if p:IsA("BasePart") and not p.Anchored then
+			local dir = p.Position - hp
+			dir = dir.Magnitude > 0.1 and dir.Unit or Vector3.yAxis
+			pcall(function()
+				p.AssemblyLinearVelocity = dir * 120 + Vector3.new(0, 60, 0)
+				p.AssemblyAngularVelocity = Vector3.new(math.random(-20, 20), math.random(-20, 20), math.random(-20, 20))
+			end)
+		end
+	end
+end
+
+local function spawnBlackHole(targetPos, onFinished)
+	local folder = Instance.new("Folder")
+	folder.Name = "BlackHole_" .. tostring(math.random(1000, 9999))
+	folder.Parent = workspace
+
+	local hp = targetPos + Vector3.new(0, CONFIG.HeightAbove, 0)
+	local F = {}
+	local softened = {}
+
+	local core = Instance.new("Part")
+	core.Name = "Core"
+	core.Shape = Enum.PartType.Ball
+	core.Anchored = true
+	core.CanCollide = false
+	core.CanQuery = false
+	core.CanTouch = false
+	core.CastShadow = false
+	core.Material = Enum.Material.Neon
+	core.Color = BLACK
+	core.Reflectance = 0
+	core.Size = Vector3.one * CONFIG.StartDiameter
+	core.CFrame = CFrame.new(hp)
+	core.Parent = folder
+
+	local lens
+	if CONFIG.Lens then
+		lens = Instance.new("Part")
+		lens.Name = "Lens"
+		lens.Shape = Enum.PartType.Ball
+		lens.Anchored = true
+		lens.CanCollide = false
+		lens.CanQuery = false
+		lens.CanTouch = false
+		lens.CastShadow = false
+		lens.Material = Enum.Material.Glass
+		lens.Color = Color3.fromRGB(190, 205, 255)
+		lens.Reflectance = 0
+		lens.Transparency = CONFIG.LensTransparency
+		lens.Size = Vector3.one * CONFIG.StartDiameter * CONFIG.LensScale
+		lens.CFrame = CFrame.new(hp)
+		lens.Parent = folder
+	end
+
+	local att = Instance.new("Attachment")
+	att.Parent = core
+
+	local E = {}
+	for name in pairs(DEFS) do
+		E[name] = U.buildEmitter(name, att)
+	end
+
+	local active = {}
+	for name, d in pairs(DEFS) do
+		if d.continuous then
+			E[name].Enabled = true
+			active[#active + 1] = name
+		end
+	end
+
+	U.setFilter(folder)
+	U.claimOwnership()
+
+	local cam = workspace.CurrentCamera
+	local baseFov = cam.FieldOfView
+	local blur = Instance.new("BlurEffect")
+	blur.Size = 0
+	blur.Parent = Lighting
+	local cc = Instance.new("ColorCorrectionEffect")
+	cc.Parent = Lighting
+	local ragdolled = false
+	local safePos = nil
+
+	function F.playSound(id, vol, looped)
+		local snd = Instance.new("Sound")
+		snd.SoundId = "rbxassetid://" .. id
+		snd.Volume = vol
+		snd.Looped = looped or false
+		snd.Parent = SoundService
+		snd:Play()
+		return snd
+	end
+
+	local launchSnd = F.playSound(CONFIG.Sounds.Launch, 1)
+	Debris:AddItem(launchSnd, 15)
+	local activeSnd = F.playSound(CONFIG.Sounds.Active, 0.35, true)
+	Debris:AddItem(activeSnd, CONFIG.Duration + 5)
+
+	local list, captured = {}, {}
+	local t0 = os.clock()
+	local scanAcc, fxAcc, claimAcc = 1, 1, 0
+	local burstT = {lightning = 0, debris = 0, colkor = 0}
+	local lightningFlip = false
+	local diameter = CONFIG.StartDiameter
+	local range = CONFIG.RangeBase + diameter * CONFIG.RangePerDiameter
+	local conn
+
+	local fxI, fxEnd = 0, nil
+
+	function F.finish()
+		if not F.done then
+			F.done = true
+			onFinished()
+		end
+	end
+
+	-- unowned-by-you parts near you stop colliding so the pull can't shove your character
+	function F.soften(root)
+		if softened[root] then
+			return
+		end
+		local rec = {}
+		local ok, parts = pcall(function() return root:GetConnectedParts(true) end)
+		if ok then
+			for _, bp in ipairs(parts) do
+				if bp.CanCollide then
+					rec[bp] = true
+					pcall(function() bp.CanCollide = false end)
+				end
+			end
+		end
+		softened[root] = rec
+	end
+
+	function F.unsoften(root)
+		local rec = softened[root]
+		if not rec then
+			return
+		end
+		for bp in pairs(rec) do
+			pcall(function() bp.CanCollide = true end)
+		end
+		softened[root] = nil
+	end
+
+	function F.restoreSoft()
+		for root in pairs(softened) do
+			F.unsoften(root)
+		end
+	end
+
+	local ents = {}
+	local DROP = {Script = true, LocalScript = true, Sound = true, ParticleEmitter = true, Beam = true, Trail = true, Fire = true, Smoke = true, Sparkles = true, PointLight = true, SpotLight = true, SurfaceLight = true, BillboardGui = true, SurfaceGui = true, Highlight = true}
+		local fxOp = OverlapParams.new()
+	fxOp.FilterType = Enum.RaycastFilterType.Exclude
+	fxOp.FilterDescendantsInstances = {folder}
+	fxOp.MaxParts = 1200
+
+	function F.pathOf(root, inst)
+		local names = {}
+		local cur = inst
+		while cur and cur ~= root do
+			table.insert(names, 1, cur.Name)
+			cur = cur.Parent
+		end
+		return names
+	end
+	function F.resolve(root, names)
+		local cur = root
+		for _, n in ipairs(names) do
+			cur = cur and cur:FindFirstChild(n)
+		end
+		return cur
+	end
+	function F.charOf(part)
+		local cur = part.Parent
+		while cur and cur ~= workspace do
+			if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then
+				return cur
+			end
+			cur = cur.Parent
+		end
+		return nil
+	end
+
+	function F.restoreRec(rec)
+		pcall(function() rec.o.LocalTransparencyModifier = 0 end)
+		if DECAL_LTM then
+			for _, dc in ipairs(rec.decals) do
+				pcall(function() dc.LocalTransparencyModifier = 0 end)
+			end
+		end
+	end
+
+	function F.removeEntity(src)
+		local e = ents[src]
+		if not e then
+			return
+		end
+		for _, rec in ipairs(e.recs) do
+			F.restoreRec(rec)
+		end
+		pcall(function() e.clone:Destroy() end)
+		ents[src] = nil
+	end
+
+	function F.clearEntities()
+		if F.stepConn then
+			F.stepConn:Disconnect()
+			F.stepConn = nil
+		end
+		for src in pairs(ents) do
+			F.removeEntity(src)
+		end
+	end
+
+	function F.makeEntity(src)
+		local c
+		local okc = pcall(function()
+			local was = src.Archivable
+			src.Archivable = true
+			c = src:Clone()
+			src.Archivable = was
+		end)
+		if not okc or not c then
+			return false
+		end
+
+		local recs = {}
+		local all = c:GetDescendants()
+		all[#all + 1] = c
+		for _, d in ipairs(all) do
+			if d:IsA("BasePart") then
+				local o = (d == c) and src or F.resolve(src, F.pathOf(c, d))
+				if o and o:IsA("BasePart") then
+					local rec = {o = o, c = d, decals = {}, meshes = {}}
+					for _, ch in ipairs(o:GetChildren()) do
+						if ch:IsA("Decal") then
+							rec.decals[#rec.decals + 1] = ch
+						end
+					end
+					for _, ch in ipairs(d:GetChildren()) do
+						if ch:IsA("SpecialMesh") and ch.MeshType == Enum.MeshType.FileMesh then
+							rec.meshes[#rec.meshes + 1] = {m = ch, base = ch.Scale}
+						end
+					end
+					recs[#recs + 1] = rec
+				end
+			end
+		end
+		if #recs == 0 then
+			c:Destroy()
+			return false
+		end
+
+		for _, d in ipairs(c:GetDescendants()) do
+			if DROP[d.ClassName] or d:IsA("JointInstance") or d:IsA("WeldConstraint") or d:IsA("Constraint") or d:IsA("BodyMover") then
+				d:Destroy()
+			end
+		end
+		local inert = c:GetDescendants()
+		inert[#inert + 1] = c
+		for _, d in ipairs(inert) do
+			if d:IsA("BasePart") then
+				d.Anchored = true
+				d.CanCollide = false
+				d.CanQuery = false
+				d.CanTouch = false
+				d.Massless = true
+			end
+		end
+		for _, h in ipairs(c:GetDescendants()) do
+			if h:IsA("Humanoid") then
+				pcall(function()
+					h.RequiresNeck = false
+					h.BreakJointsOnDeath = false
+					h.EvaluateStateMachine = false
+					h.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+					h.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+				end)
+			end
+		end
+		c.Parent = folder
+		ents[src] = {clone = c, recs = recs}
+		return true
+	end
+
+	function F.refreshEntities()
+		if fxEnd then
+			return
+		end
+		local rs = range * CONFIG.BendRangeMult
+		local found = workspace:GetPartBoundsInRadius(hp, rs, fxOp)
+		local cand, seen = {}, {}
+		for _, part in ipairs(found) do
+			if not part:IsA("Terrain") and part.Transparency < 0.98 then
+				local src = F.charOf(part)
+				if src then
+					if not seen[src] then
+						seen[src] = true
+						cand[#cand + 1] = {src, (src.PrimaryPart or part).Position}
+					end
+				elseif not seen[part] then
+					local sz = part.Size
+					if math.max(sz.X, sz.Y, sz.Z) <= CONFIG.BendMaxPartSize then
+						seen[part] = true
+						cand[#cand + 1] = {part, part.Position}
+					end
+				end
+			end
+		end
+		table.sort(cand, function(a, b)
+			return (a[2] - hp).Magnitude < (b[2] - hp).Magnitude
+		end)
+
+		local want = {}
+		local budgetE, budgetP, made = CONFIG.BendMaxEntities, CONFIG.BendMaxParts, 0
+		for _, cd in ipairs(cand) do
+			if budgetE <= 0 or budgetP <= 0 then
+				break
+			end
+			local src = cd[1]
+			if ents[src] then
+				want[src] = true
+				budgetE -= 1
+				budgetP -= #ents[src].recs
+			elseif made < CONFIG.BendNewPerTick and F.makeEntity(src) then
+				made += 1
+				want[src] = true
+				budgetE -= 1
+				budgetP -= #ents[src].recs
+			end
+		end
+		for src in pairs(ents) do
+			if not want[src] then
+				F.removeEntity(src)
+			end
+		end
+	end
+
+	function F.applyDeform(strength, now)
+		local rs = range * CONFIG.BendRangeMult
+		for _, e in pairs(ents) do
+			for _, rec in ipairs(e.recs) do
+				local o, pp = rec.o, rec.c
+				if o.Parent and pp.Parent then
+					if pp.CanCollide then
+						pp.CanCollide = false
+					end
+					o.LocalTransparencyModifier = 1
+					if DECAL_LTM then
+						for _, dc in ipairs(rec.decals) do
+							dc.LocalTransparencyModifier = 1
+						end
+					end
+
+					local cf, sz = o.CFrame, o.Size
+					local off = cf.Position - hp
+					local d = off.Magnitude
+					local s = (math.clamp(1 - d / rs, 0, 1) ^ 1.2) * strength
+					if s < 0.004 or d < 0.05 then
+						pp.CFrame = cf
+						pp.Size = sz
+						for _, mm in ipairs(rec.meshes) do
+							mm.m.Scale = mm.base
+						end
+					else
+						local ang = s * s * CONFIG.BendSwirl * (1 + 0.35 * math.sin(now * 1.7))
+						local rh = (CFrame.Angles(0, ang, 0) * off) / d
+						local wave = math.sin(d * 0.3 - now * 5) * CONFIG.BendRipple * s
+						local nd = math.max(d * (1 - s * CONFIG.BendPull) + wave, diameter * 0.55)
+						local pos = hp + rh * nd
+
+						local rot = cf - cf.Position
+						local axis = Vector3.yAxis:Cross(-rh)
+						if axis.Magnitude > 0.01 then
+							rot = CFrame.fromAxisAngle(axis.Unit, s * CONFIG.BendTilt) * rot
+						end
+						rot = CFrame.fromAxisAngle(rh, s * CONFIG.BendTwist * math.sin(now * 2 + d * 0.2)) * rot
+						local ncf = CFrame.new(pos) * rot
+
+						local kr = 1 - s * CONFIG.BendRadial
+						local kt = 1 + s * CONFIG.BendTangent
+						local lr = ncf:VectorToObjectSpace(rh)
+						local nsz = Vector3.new(
+							sz.X * (kt + (kr - kt) * lr.X * lr.X),
+							sz.Y * (kt + (kr - kt) * lr.Y * lr.Y),
+							sz.Z * (kt + (kr - kt) * lr.Z * lr.Z)
+						)
+
+						pp.CFrame = ncf
+						pp.Size = nsz
+						for _, mm in ipairs(rec.meshes) do
+							mm.m.Scale = mm.base * Vector3.new(nsz.X / sz.X, nsz.Y / sz.Y, nsz.Z / sz.Z)
+						end
+					end
+				end
+			end
+		end
+	end
+
+	F.stepConn = RunService.Stepped:Connect(function()
+		for _, e in pairs(ents) do
+			for _, rec in ipairs(e.recs) do
+				local cp = rec.c
+				if cp.Parent and cp.CanCollide then
+					cp.CanCollide = false
+				end
+			end
+		end
+	end)
+
+	local camName = "BlackHoleCam_" .. folder.Name .. tostring(math.floor(os.clock() * 1000))
+	function F.teardown()
+		if conn then
+			pcall(function() conn:Disconnect() end)
+		end
+		pcall(function() RunService:UnbindFromRenderStep(camName) end)
+		pcall(F.clearEntities)
+		pcall(F.restoreSoft)
+		pcall(function() blur:Destroy() end)
+		pcall(function() cc:Destroy() end)
+		pcall(function() activeSnd:Destroy() end)
+		pcall(function() folder:Destroy() end)
+		pcall(function() cam.FieldOfView = baseFov end)
+		local h = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+		if h then
+			pcall(function()
+				h.CameraOffset = Vector3.zero
+				if ragdolled then
+					h.PlatformStand = false
+				end
+			end)
+		end
+	end
+	env.BlackHoleFxClear = F.teardown
+
+	RunService:BindToRenderStep(camName, Enum.RenderPriority.Camera.Value + 1, function()
+		local now = os.clock()
+		local I, relax = fxI, 1
+		if fxEnd then
+			local x = math.clamp((now - fxEnd) / 1.2, 0, 1)
+			relax = 1 - x
+			I = I * relax
+			if x >= 1 then
+				RunService:UnbindFromRenderStep(camName)
+				F.clearEntities()
+				return
+			end
+		end
+
+		local camPos = cam.CFrame.Position
+		local toHole = hp - camPos
+		local dist = toHole.Magnitude
+		if (CONFIG.CamPull > 0 or CONFIG.CamRoll ~= 0) and I > 0.01 and dist > 1 then
+			local bent = cam.CFrame.LookVector:Lerp(toHole / dist, I * CONFIG.CamPull)
+			if bent.Magnitude > 0.01 then
+				local roll = I * math.rad(CONFIG.CamRoll) * (math.sin(now * 2.3) * 0.6 + math.sin(now * 6.1) * 0.4)
+				cam.CFrame = CFrame.lookAt(camPos, camPos + bent) * CFrame.Angles(0, 0, roll)
+			end
+		end
+
+		local a = math.clamp((now - t0) / CONFIG.Duration, 0, 1)
+		F.applyDeform(relax * (0.3 + 0.7 * a), now)
+	end)
+
+	function F.rescale()
+		local k = diameter / 20
+		for name, e in pairs(E) do
+			local d = DEFS[name]
+			pcall(function() e.Size = U.NS(d.size, k * CONFIG.ParticleScale * (d.cs or 1)) end)
+		end
+	end
+
+	function F.scan()
+		U.setFilter(folder)
+		local found = workspace:GetPartBoundsInRadius(hp, range, overlap)
+		local newList = {}
+		for _, p in ipairs(found) do
+			local root = p.AssemblyRootPart
+			if root and not root.Anchored then
+				local model, isPlayer = U.getNpc(p)
+				if model then
+					newList[#newList + 1] = p
+					if not captured[model] then
+						captured[model] = true
+					end
+					local hum = model:FindFirstChildOfClass("Humanoid")
+					if hum then
+						pcall(function() hum.PlatformStand = true end)
+						pcall(function() hum:ChangeState(Enum.HumanoidStateType.Physics) end)
+					end
+				elseif not isPlayer then
+					newList[#newList + 1] = p
+				end
+			end
+		end
+		list = newList
+	end
+
+	local function step(dt)
+		local t = os.clock() - t0
+		local a = math.clamp(t / CONFIG.Duration, 0, 1)
+		diameter = CONFIG.StartDiameter + (CONFIG.EndDiameter - CONFIG.StartDiameter) * a
+		range = CONFIG.RangeBase + diameter * CONFIG.RangePerDiameter
+		core.Size = Vector3.one * diameter
+		if lens then
+			lens.Size = Vector3.one * diameter * CONFIG.LensScale
+		end
+
+		scanAcc += dt
+		if scanAcc >= 0.2 then
+			scanAcc = 0
+			F.scan()
+			F.refreshEntities()
+		end
+
+		claimAcc += dt
+		if claimAcc >= 1 then
+			claimAcc = 0
+			U.claimOwnership()
+		end
+
+		fxAcc += dt
+		if fxAcc >= 0.1 then
+			fxAcc = 0
+			F.rescale()
+		end
+
+		burstT.lightning += dt
+		if burstT.lightning >= 0.3 then
+			burstT.lightning = 0
+			lightningFlip = not lightningFlip
+			E[lightningFlip and "BrightLightning" or "BrightLightning2"]:Emit(2)
+		end
+		burstT.debris += dt
+		if burstT.debris >= 0.6 then
+			burstT.debris = 0
+			E.C1:Emit(6)
+			E.C2:Emit(6)
+		end
+		burstT.colkor += dt
+		if burstT.colkor >= 0.8 then
+			burstT.colkor = 0
+			E.Colkor:Emit(4)
+		end
+
+		local accel = CONFIG.PullMin + (CONFIG.PullMax - CONFIG.PullMin) * a
+		local maxSpeed = CONFIG.MaxSpeedMin + (CONFIG.MaxSpeedMax - CONFIG.MaxSpeedMin) * a
+		local seen = {}
+		local grav = workspace.Gravity
+		local pChar = lp.Character
+		local pRoot = pChar and pChar:FindFirstChild("HumanoidRootPart")
+
+		for i = #list, 1, -1 do
+			local p = list[i]
+			if not p.Parent then
+				table.remove(list, i)
+			else
+				local root = p.AssemblyRootPart
+				if root and not seen[root] and not root.Anchored then
+					seen[root] = true
+					if pRoot then
+						local nd = (root.Position - pRoot.Position).Magnitude
+						if nd < 16 then
+							F.soften(root)
+						elseif nd > 28 and softened[root] then
+							F.unsoften(root)
+						end
+					end
+					local off = hp - root.Position
+					local d = off.Magnitude
+					if d < range and d > 0.05 then
+						local u = off / d
+						local f = (1 - d / range) ^ 2
+						local push = accel * f
+						local swirl = u:Cross(Vector3.yAxis) * push * CONFIG.Swirl
+						local v = root.AssemblyLinearVelocity + (u * push + swirl + Vector3.new(0, grav, 0)) * dt
+						if d < diameter * 0.6 then
+							v = v * 0.92
+						end
+						local sp = v.Magnitude
+						if sp > maxSpeed then
+							v = v / sp * maxSpeed
+						end
+						root.AssemblyLinearVelocity = v
+						root.AssemblyAngularVelocity = Vector3.new(f * 8, f * 12, f * 6)
+					end
+				end
+			end
+		end
+
+		local char = lp.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local myHum = char and char:FindFirstChildOfClass("Humanoid")
+		local intensity = 0
+		local pullF = 0
+		if hrp then
+			local off = hp - hrp.Position
+			local d = off.Magnitude
+			local proximity = math.clamp(1 - d / (range * CONFIG.DistortRangeMult), 0, 1)
+			pullF = d < range and (1 - d / range) ^ 2 or 0
+			intensity = (proximity ^ 1.3 * 0.7 + pullF * 0.3) * (0.35 + 0.65 * a)
+			intensity = math.clamp(intensity * 1.15, 0, 1)
+			if CONFIG.PullPlayer and d < range and d > 0.05 then
+				local u = off / d
+				local f = (1 - d / range) ^ 2
+				local ramp = math.clamp(t / 1.5, 0, 1)
+				local push = accel * f * CONFIG.PlayerPullMult * ramp
+				local swirl = u:Cross(Vector3.yAxis) * push * CONFIG.PlayerSwirl
+				local v = hrp.AssemblyLinearVelocity + (u * push + swirl + Vector3.new(0, grav * 0.6 * ramp, 0)) * dt
+				local sp = v.Magnitude
+				local cap = math.min(maxSpeed * 0.8, CONFIG.PlayerMaxSpeed)
+				if sp > cap then
+					v = v / sp * cap
+				end
+				hrp.AssemblyLinearVelocity = v
+			end
+			if myHum and myHum.FloorMaterial ~= Enum.Material.Air then
+				safePos = hrp.Position
+			end
+			if myHum then
+				if d < range * 0.5 then
+					myHum.PlatformStand = true
+					ragdolled = true
+				elseif ragdolled then
+					myHum.PlatformStand = false
+					ragdolled = false
+				end
+			end
+		end
+
+		fxI = intensity
+		blur.Size = intensity * 8
+		cc.Saturation = -intensity * 0.35
+		cc.Contrast = intensity * 0.15
+		cc.Brightness = -intensity * 0.08
+		cc.TintColor = Color3.new(1, 1 - intensity * 0.15, 1 - intensity * 0.15)
+		cam.FieldOfView = baseFov + intensity * CONFIG.FovMax * (0.6 + 0.4 * math.sin(t * 12))
+		if myHum then
+			local amt = intensity * CONFIG.ShakeMax * 2 + pullF * a * CONFIG.ShakeMax + a * 0.05
+			myHum.CameraOffset = Vector3.new((math.random() - 0.5) * amt, (math.random() - 0.5) * amt, 0)
+		end
+		activeSnd.Volume = 0.35 + 0.65 * a
+		activeSnd.PlaybackSpeed = 0.9 + 0.2 * a
+
+		if t >= CONFIG.Duration then
+			conn:Disconnect()
+			fxEnd = os.clock()
+
+			activeSnd:Stop()
+			activeSnd:Destroy()
+			local explodeSnd = F.playSound(CONFIG.Sounds.Explode, 1)
+			Debris:AddItem(explodeSnd, 15)
+
+			if myHum then
+				myHum.CameraOffset = Vector3.zero
+				if ragdolled then
+					myHum.PlatformStand = false
+				end
+			end
+			task.spawn(function()
+				local b0, s0, c0 = 12, cc.Saturation, cc.Contrast
+				local br0 = 0.15
+				local fov0 = cam.FieldOfView
+				blur.Size = b0
+				cc.Brightness = br0
+				local t1 = os.clock()
+				while true do
+					local x = math.clamp((os.clock() - t1) / 1.2, 0, 1)
+					blur.Size = b0 * (1 - x)
+					cc.Saturation = s0 * (1 - x)
+					cc.Contrast = c0 * (1 - x)
+					cc.Brightness = br0 * (1 - x)
+					cc.TintColor = Color3.new(1, 1, 1)
+					cam.FieldOfView = fov0 + (baseFov - fov0) * x
+					if x >= 1 then
+						break
+					end
+					RunService.RenderStepped:Wait()
+				end
+				blur:Destroy()
+				cc:Destroy()
+			end)
+
+			U.claimOwnership()
+			for _, name in ipairs(active) do
+				E[name].Enabled = false
+			end
+
+			local k = diameter / 20
+			for name, e in pairs(E) do
+				local d = DEFS[name]
+				pcall(function() e.Size = U.NS(d.size, k * 1.5 * CONFIG.ParticleScale * (d.cs or 1)) end)
+			end
+
+			E.Blast:Emit(15)
+			E.BlackShockwave:Emit(2)
+			E.BlackShockwave2:Emit(2)
+			E.Shockwave:Emit(1)
+			E.BlackFlashWind:Emit(15)
+			E.BlackDust:Emit(30)
+			E.C1:Emit(25)
+			E.C2:Emit(25)
+			E.Colkor:Emit(8)
+			E.BrightLightning:Emit(6)
+			E.BrightLightning2:Emit(6)
+
+			core.Transparency = 1
+			if lens then
+				lens.Transparency = 1
+			end
+
+			local char = lp.Character
+			local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+			if rootPart then
+				local dist = (rootPart.Position - hp).Magnitude
+				U.shake(math.clamp(1 - dist / (range * 2), 0, 1) * CONFIG.ExplodeShake)
+			end
+
+			if rootPart then
+				local poff = rootPart.Position - hp
+				local flat = Vector3.new(poff.X, 0, poff.Z)
+				local pdir = flat.Magnitude > 0.5 and flat.Unit or Vector3.zero
+				local pf = math.clamp(1 - poff.Magnitude / (range * CONFIG.KillRangeMult), 0, 1)
+				pcall(function()
+					rootPart.AssemblyAngularVelocity = Vector3.zero
+					rootPart.AssemblyLinearVelocity = pdir * CONFIG.PlayerBlast * pf + Vector3.new(0, CONFIG.PlayerBlastUp * pf, 0)
+				end)
+				-- safety net: rescue from the void
+				task.spawn(function()
+					local untilT = os.clock() + 8
+					while os.clock() < untilT do
+						local c2 = lp.Character
+						local r2 = c2 and c2:FindFirstChild("HumanoidRootPart")
+						if r2 and safePos and r2.Position.Y < workspace.FallenPartsDestroyHeight + 150 then
+							r2.AssemblyLinearVelocity = Vector3.zero
+							r2.CFrame = CFrame.new(safePos + Vector3.new(0, 4, 0))
+							break
+						end
+						task.wait(0.1)
+					end
+				end)
+			end
+
+			U.setFilter(folder)
+			local blastRange = range * CONFIG.KillRangeMult
+			local found = workspace:GetPartBoundsInRadius(hp, blastRange, overlap)
+			local done = {}
+			for _, p in ipairs(found) do
+				local root = p.AssemblyRootPart
+				if root and not root.Anchored and not done[root] then
+					local model, isPlayer = U.getNpc(p)
+					if not isPlayer and not model then
+						done[root] = true
+						local off = root.Position - hp
+						local d = off.Magnitude
+						local dir = d > 0.1 and off / d or Vector3.yAxis
+						local f = math.clamp(1 - d / blastRange, 0.15, 1)
+						pcall(function()
+							root.AssemblyLinearVelocity = dir * CONFIG.BlastPower * f + Vector3.new(0, 40 * f, 0)
+						end)
+					end
+				end
+			end
+
+			for model in pairs(captured) do
+				if model.Parent then
+					local mroot = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+					if mroot and (mroot.Position - hp).Magnitude <= blastRange then
+						U.killNpc(model, hp)
+					else
+						local hum = model:FindFirstChildOfClass("Humanoid")
+						if hum then
+							pcall(function() hum.PlatformStand = false end)
+							pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+						end
+					end
+				end
+			end
+
+			task.delay(0.6, F.restoreSoft)
+			Debris:AddItem(folder, 5)
+			env.BlackHoleFxClear = nil
+			F.finish()
+		end
+	end
+
+	conn = RunService.Heartbeat:Connect(function(dt)
+		if not pcall(step, dt) and not fxEnd then
+			F.teardown()
+			env.BlackHoleFxClear = nil
+			F.finish()
+		end
+	end)
+end
+
+local tool
+
+local function startCooldown()
+	task.spawn(function()
+		for i = CONFIG.Cooldown, 1, -1 do
+			if tool and tool.Parent then
+				tool.Name = "Black Hole (" .. i .. "s)"
+			end
+			task.wait(1)
+		end
+		busy = false
+		if tool and tool.Parent then
+			tool.Name = "Black Hole"
+		end
+	end)
+end
+
+local function giveTool()
+	for _, container in ipairs({lp:FindFirstChildOfClass("Backpack"), lp.Character}) do
+		if container then
+			for _, c in ipairs(container:GetChildren()) do
+				if c:GetAttribute("BlackHoleTool") then
+					c:Destroy()
+				end
+			end
+		end
+	end
+	tool = Instance.new("Tool")
+	tool.Name = busy and "Black Hole (cooldown)" or "Black Hole"
+	tool.ToolTip = "Click to summon a black hole"
+	tool.RequiresHandle = false
+	tool.CanBeDropped = false
+	tool:SetAttribute("BlackHoleTool", true)
+	tool.Activated:Connect(function()
+		if busy then
+			return
+		end
+		local target = mouse.Hit
+		if not target then
+			return
+		end
+		busy = true
+		local ok = pcall(spawnBlackHole, target.Position, startCooldown)
+		if not ok then
+			if env.BlackHoleFxClear then
+				pcall(env.BlackHoleFxClear)
+				env.BlackHoleFxClear = nil
+			end
+			busy = false
+		end
+	end)
+	tool.Parent = lp:WaitForChild("Backpack")
+end
+
+giveTool()
+
+local charConn = lp.CharacterAdded:Connect(function()
+	task.wait(1)
+	giveTool()
+end)
+
+env.BlackHoleCleanup = function()
+	if env.BlackHoleFxClear then
+		pcall(env.BlackHoleFxClear)
+	end
+	charConn:Disconnect()
+	if tool then
+		tool:Destroy()
+	end
+end
