@@ -1880,11 +1880,11 @@ function Live.start()
 	track(UserInputService.InputEnded:Connect(function(input, processed)
 		Live.onInput(input, processed, 0)
 	end))
-	notify("Spells live v4", "starting")
+	notify("Spells live v5", "starting")
 	local okName, execName = pcall(function()
 		return identifyexecutor and identifyexecutor() or "?"
 	end)
-	Live.log("v3 start ready=" .. tostring(Live.ready()) .. " exec=" .. tostring(okName and execName or "?") .. " http=" .. tostring(httpRequest ~= nil) .. " loadstring=" .. tostring(loadstring ~= nil) .. " job=" .. string.sub(Live.room(), 1, 8) .. " entries=" .. tostring(State.entries and #State.entries or 0))
+	Live.log("v5 start ready=" .. tostring(Live.ready()) .. " exec=" .. tostring(okName and execName or "?") .. " http=" .. tostring(httpRequest ~= nil) .. " loadstring=" .. tostring(loadstring ~= nil) .. " job=" .. string.sub(Live.room(), 1, 8) .. " entries=" .. tostring(State.entries and #State.entries or 0))
 	task.spawn(function()
 		while State.alive do
 			if not Live.ready() then
@@ -3453,10 +3453,6 @@ local function createSettings()
 		end
 		actionButton("RELOAD REPO", 1, false, function()
 			task.spawn(UI.populate)
-	local okLive, errLive = pcall(Live.start)
-	if not okLive then
-		notify("Spells live", "start error: " .. tostring(errLive))
-	end
 		end)
 		actionButton("DISPEL ALL", 2, false, function()
 			Runner.stopAll(false)
@@ -4621,6 +4617,11 @@ local function main()
 	UI.setOpen(true)
 	creditNotifications()
 	task.spawn(UI.populate)
+	local okLive, errLive = pcall(Live.start)
+	if not okLive then
+		notify("Spells live", "start error: " .. tostring(errLive))
+		pcall(Live.log, "start error: " .. tostring(errLive))
+	end
 
 	task.spawn(function()
 		Owner.ok = Owner.verify()
