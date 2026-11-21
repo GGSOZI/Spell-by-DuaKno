@@ -1847,15 +1847,25 @@ function Live.start()
 	track(UserInputService.InputEnded:Connect(function(input, processed)
 		Live.onInput(input, processed, 0)
 	end))
-	if not CONFIG.Firebase or CONFIG.Firebase.Url == "" then
-		warn("[spells live] set CONFIG.Firebase.Url to enable live sync")
-	end
+	notify("Spells live v3", "starting")
 	task.spawn(function()
 		while State.alive do
-			if Live.ready() then
+			if not Live.ready() then
+				if not Live.warnedOff then
+					Live.warnedOff = true
+					Live.say("live: off (turn on Live sync in Settings and set Firebase Url)", THEME.bad)
+				end
+			else
 				local ok, data = Live.req("GET", "")
 				if ok then
+					if not Live.connected then
+						Live.connected = true
+						Live.say("live: connected, room " .. string.sub(Live.room(), 1, 6), THEME.good)
+					end
 					pcall(Live.handle, data or {})
+				elseif not Live.lastCode and not Live.warnedNil then
+					Live.warnedNil = true
+					Live.say("live: no response from firebase (executor blocks the request?)", THEME.bad)
 				elseif Live.lastCode and Live.lastCode ~= Live.warned then
 					Live.warned = Live.lastCode
 					Live.say("firebase error " .. tostring(Live.lastCode) .. ", check url and rules", THEME.bad)
@@ -3386,7 +3396,10 @@ local function createSettings()
 		end
 		actionButton("RELOAD REPO", 1, false, function()
 			task.spawn(UI.populate)
-	pcall(Live.start)
+	local okLive, errLive = pcall(Live.start)
+	if not okLive then
+		notify("Spells live", "start error: " .. tostring(errLive))
+	end
 		end)
 		actionButton("DISPEL ALL", 2, false, function()
 			Runner.stopAll(false)
