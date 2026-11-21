@@ -147,10 +147,50 @@ local State = {
 	spin = nil,
 	binding = false,
 	toggleKey = Enum.KeyCode.RightShift,
-	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, ToggleKey = "RightShift" },
+	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, Quiet = true, Debug = false, NoShare = {}, ToggleKey = "RightShift" },
 }
 
 local Live = { ghosts = {}, starting = {}, my = {}, outbox = {}, sent = {}, seen = {}, hbs = {}, beat = 0, seq = 0, toolOwner = setmetatable({}, { __mode = "k" }) }
+
+local Debug = { buf = {}, max = 160, t0 = os.clock() }
+
+function Debug.fmt(...)
+	local parts = {}
+	for i = 1, select("#", ...) do
+		parts[i] = tostring((select(i, ...)))
+	end
+	return table.concat(parts, " ")
+end
+
+function Debug.add(text, color)
+	local e = { t = os.clock() - Debug.t0, text = tostring(text), color = color }
+	table.insert(Debug.buf, e)
+	if #Debug.buf > Debug.max then
+		table.remove(Debug.buf, 1)
+	end
+	if Debug.onAdd then
+		pcall(Debug.onAdd, e)
+	end
+end
+
+function Debug.err(text)
+	Debug.add(text, THEME.bad)
+	if not State.settings.Quiet then
+		warn("[spells] " .. tostring(text))
+	end
+end
+
+-- print / warn handed to power and weapon scripts: quiet = they land in the debug panel instead of the console
+function Debug.hooks(name)
+	if State.settings.Quiet then
+		return function(...)
+			Debug.add("[" .. name .. "] " .. Debug.fmt(...))
+		end, function(...)
+			Debug.add("[" .. name .. "] " .. Debug.fmt(...), THEME.bad)
+		end
+	end
+	return print, warn
+end
 
 local function track(conn)
 	table.insert(State.connections, conn)
@@ -934,12 +974,12 @@ function Runner.run(entry)
 		return
 	end
 
-	local fn, compileErr = loadstring(src, "=spellshub_" .. entry.file)
+	local fn, compileErr = loadstring("local print, warn = ...; " .. src, "=spellshub_" .. entry.file)
 	if not fn then
 		Runner.busy, Runner.busyPath = false, nil
 		status("compile error: " .. entry.name, THEME.bad)
 		notify("Spells", "compile error in " .. entry.name)
-		warn("[spells] " .. tostring(compileErr))
+		Debug.err("compile " .. entry.name .. ": " .. tostring(compileErr))
 		fire()
 		return
 	end
@@ -962,13 +1002,14 @@ function Runner.run(entry)
 	pcall(Live.onRun, entry, run)
 
 	local th = task.spawn(function()
-		local ok, runErr = pcall(fn)
+		local hp, hw = Debug.hooks(entry.name)
+		local ok, runErr = pcall(fn, hp, hw)
 		if ok then
 			status("running " .. entry.name, THEME.good)
 		else
 			status("runtime error: " .. entry.name, THEME.bad)
 			notify("Spells", "runtime error in " .. entry.name)
-			warn("[spells] " .. tostring(runErr))
+			Debug.err("runtime " .. entry.name .. ": " .. tostring(runErr))
 		end
 	end)
 	table.insert(run.threads, th)
@@ -993,7 +1034,8 @@ Live.pending = {}
 Live.myMeta = {}
 Live.logBuf = {}
 
-function Live.log(text)
+function Live.log(text, color)
+	Debug.add(text, color)
 	table.insert(Live.logBuf, tostring(math.floor(os.clock())) .. " " .. tostring(text))
 	if #Live.logBuf > 14 then
 		table.remove(Live.logBuf, 1)
@@ -1034,7 +1076,7 @@ function Live.fallbackEntry(w)
 end
 
 function Live.say(text, color)
-	Live.log(text)
+	Live.log(text, color)
 	status(text, color)
 	local now = os.clock()
 	if color == THEME.bad and now - (Live.lastLoud[text] or -99) > 30 then
@@ -1046,7 +1088,7 @@ function Live.say(text, color)
 end
 
 function Live.wrap(src)
-	return "local __G = ...; local game, Game, Instance, getgenv, cloneref, gethui = __G.game, __G.Game, __G.Instance, __G.getgenv, __G.cloneref, __G.gethui\n" .. src
+	return "local __G = ...; local game, Game, Instance, getgenv, cloneref, gethui, workspace, Workspace, print, warn = __G.game, __G.Game, __G.Instance, __G.getgenv, __G.cloneref, __G.gethui, __G.workspace, __G.Workspace, __G.print, __G.warn\n" .. src
 end
 
 function Live.flushPending(g)
@@ -1160,6 +1202,7 @@ end
 
 function Live.send(ev)
 	if not Live.ready() or next(Live.my) == nil then return end
+	if ev.p and not Live.my[ev.p] then return end
 	Live.seq += 1
 	ev.u = Live.myId()
 	local key = string.format("%013d_%d_%d", DateTime.now().UnixTimestampMillis, ev.u, Live.seq)
@@ -1264,10 +1307,39 @@ end
 function Live.onRun(entry, run)
 	if not Live.ready() then return end
 	run.liveBefore = run.before or {}
-	Live.my[Live.hash(entry.path)] = entry.path
-	Live.myMeta[Live.hash(entry.path)] = { k = entry.kind, c = entry.category }
+	if not State.settings.NoShare[entry.path] then
+		Live.my[Live.hash(entry.path)] = entry.path
+		Live.myMeta[Live.hash(entry.path)] = { k = entry.kind, c = entry.category }
+	end
 	Live.watchRun(run)
 	Live.pushActive()
+end
+
+function Live.isShared(entry)
+	return not State.settings.NoShare[entry.path]
+end
+
+function Live.setShare(entry, v)
+	local h = Live.hash(entry.path)
+	if v then
+		State.settings.NoShare[entry.path] = nil
+	else
+		State.settings.NoShare[entry.path] = true
+	end
+	saveSettings()
+	Debug.add("share " .. entry.name .. ": " .. (v and "on" or "off"))
+	if State.runs[entry.path] and Live.ready() then
+		if v then
+			Live.my[h] = entry.path
+			Live.myMeta[h] = { k = entry.kind, c = entry.category }
+		else
+			Live.my[h] = nil
+		end
+		Live.pushActive()
+		if next(Live.my) == nil then
+			task.spawn(Live.req, "DELETE", "/mouse/" .. Live.myId())
+		end
+	end
 end
 
 function Live.onStop(entry, run)
@@ -1406,6 +1478,52 @@ function Live.buildGhost(g)
 
 	g.players = Live.passthrough(Players, { LocalPlayer = lpProxy })
 
+	local camOver = setmetatable({}, {
+		__index = function(_, k)
+			if k == "CFrame" or k == "CoordinateFrame" then
+				local oc = g.owner.Character
+				local head = oc and (oc:FindFirstChild("Head") or oc:FindFirstChild("HumanoidRootPart"))
+				if not head then return nil end
+				if (g.hit.Position - head.Position).Magnitude > 0.001 then
+					return CFrame.lookAt(head.Position, g.hit.Position)
+				end
+				return head.CFrame
+			end
+			return nil
+		end,
+	})
+	local realCam = function() return workspace.CurrentCamera end
+	g.camera = setmetatable({}, {
+		__index = function(_, k)
+			local o = camOver[k]
+			if o ~= nil then return o end
+			local c = realCam()
+			if not c then return nil end
+			local v = c[k]
+			if type(v) == "function" then
+				return function(_, ...) return v(c, ...) end
+			end
+			return v
+		end,
+		__newindex = function(_, k, v)
+			if k == "CFrame" or k == "FieldOfView" or k == "CameraType" or k == "CameraSubject" or k == "Focus" or k == "CoordinateFrame" then return end
+			local c = realCam()
+			if c then c[k] = v end
+		end,
+	})
+	g.workspace = setmetatable({}, {
+		__index = function(_, k)
+			if k == "CurrentCamera" or k == "Camera" then return g.camera end
+			local v = workspace[k]
+			if type(v) == "function" then
+				return function(_, ...) return v(workspace, ...) end
+			end
+			return v
+		end,
+		__newindex = function(_, k, v) workspace[k] = v end,
+		__tostring = function() return "Workspace" end,
+	})
+
 	g.uis = Live.passthrough(UserInputService, {
 		InputBegan = g.inputBegan.Event,
 		InputEnded = g.inputEnded.Event,
@@ -1449,6 +1567,8 @@ function Live.buildGhost(g)
 			return g.uis
 		elseif name == "ContextActionService" then
 			return g.cas
+		elseif name == "Workspace" then
+			return g.workspace
 		end
 		return game:GetService(name)
 	end
@@ -1459,7 +1579,7 @@ function Live.buildGhost(g)
 				return function(_, name)
 					return service(name)
 				end
-			elseif k == "Players" or k == "UserInputService" or k == "ContextActionService" then
+			elseif k == "Players" or k == "UserInputService" or k == "ContextActionService" or k == "Workspace" then
 				return service(k)
 			end
 			local v = game[k]
@@ -1493,9 +1613,14 @@ function Live.buildGhost(g)
 	}, { __index = Instance })
 
 	g.genv = {}
+	local gp, gw = Debug.hooks("ghost " .. tostring(g.entry and g.entry.name or "?"))
 	g.env = {
+		print = gp,
+		warn = gw,
 		game = gameProxy,
 		Game = gameProxy,
+		workspace = g.workspace,
+		Workspace = g.workspace,
 		Instance = instance,
 		getgenv = function()
 			return g.genv
@@ -1702,7 +1827,7 @@ function Live.startGhost(key, w)
 		Live.buildGhost(g)
 		local fn, err = loadstring(Live.wrap(src), "=spellshub_ghost_" .. w.uid .. "_" .. entry.file)
 		if not fn then
-			warn("[spells live] " .. tostring(err))
+			Debug.err("ghost compile " .. entry.file .. ": " .. tostring(err))
 			return
 		end
 		g.source = chunkSource(fn)
@@ -1832,7 +1957,12 @@ function Live.decoyBuild()
 	vf.Force = Vector3.new(0, droot.AssemblyMass * workspace.Gravity, 0)
 	vf.Parent = droot
 
-	local d = { model = model, root = droot, hum = dhum, char = char, conns = {}, orig = {}, applied = {} }
+	local d = { model = model, root = droot, hum = dhum, char = char, conns = {}, orig = {}, applied = {}, parts = {}, born = os.clock() }
+	for _, part in ipairs(model:GetDescendants()) do
+		if part:IsA("BasePart") then
+			table.insert(d.parts, part)
+		end
+	end
 	Live.decoy = d
 	table.insert(d.conns, RunService.Stepped:Connect(function()
 		local rr, rh = Live.realRoot(), Live.realHum()
@@ -1843,6 +1973,9 @@ function Live.decoyBuild()
 		droot.CFrame = rr.CFrame
 		droot.AssemblyLinearVelocity = rr.AssemblyLinearVelocity
 		droot.AssemblyAngularVelocity = Vector3.zero
+		for _, part in ipairs(d.parts) do
+			part.CanCollide = false
+		end
 		d.v0 = rr.AssemblyLinearVelocity
 		for _, f in ipairs(Live.decoyFields) do
 			if d.applied[f] == nil then
@@ -1853,7 +1986,7 @@ function Live.decoyBuild()
 	table.insert(d.conns, RunService.Heartbeat:Connect(function()
 		local rr, rh = Live.realRoot(), Live.realHum()
 		if not rr or not rh or not d.v0 then return end
-		if not droot.Anchored then
+		if not droot.Anchored and os.clock() - d.born > 0.4 then
 			local dv = droot.AssemblyLinearVelocity - d.v0
 			if dv.Magnitude > 2 then
 				rr.AssemblyLinearVelocity = rr.AssemblyLinearVelocity + dv
@@ -2608,6 +2741,217 @@ local function ghostButton(parent, text, danger)
 	return b
 end
 
+
+--// ============================== live debug panel ==============================
+
+function Debug.build()
+	if Debug.frame and Debug.frame.Parent then return end
+	if not State.gui then return end
+	local f = new("Frame", {
+		Name = "SpellsDebug",
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -12, 0, 56),
+		Size = UDim2.fromOffset(300, 190),
+		BackgroundColor3 = THEME.panel,
+		BackgroundTransparency = 0.04,
+		ZIndex = 60,
+		Visible = false,
+		Parent = State.gui,
+	})
+	corner(f, 4)
+	stroke(f, THEME.line, 1)
+	local head = new("Frame", { Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = THEME.raised, ZIndex = 61, Parent = f })
+	corner(head, 4)
+	new("TextLabel", {
+		Position = UDim2.fromOffset(10, 0),
+		Size = UDim2.new(1, -110, 1, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextColor3 = THEME.soft,
+		Text = "LIVE DEBUG",
+		ZIndex = 62,
+		Parent = head,
+	})
+	local function headBtn(text, x, w)
+		local b = new("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, x, 0.5, 0),
+			Size = UDim2.fromOffset(w, 16),
+			BackgroundColor3 = THEME.bg,
+			Font = Enum.Font.GothamBold,
+			TextSize = 9,
+			TextColor3 = THEME.soft,
+			ZIndex = 62,
+			Parent = head,
+		})
+		b.Text = text
+		corner(b, 3)
+		return b
+	end
+	local closeBtn = headBtn("X", -6, 20)
+	local clearBtn = headBtn("CLEAR", -30, 44)
+	local copyBtn = headBtn("COPY", -78, 40)
+	local info = new("TextLabel", {
+		Position = UDim2.fromOffset(8, 28),
+		Size = UDim2.new(1, -16, 0, 26),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		TextSize = 10,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		TextColor3 = THEME.good,
+		ZIndex = 61,
+		Parent = f,
+	})
+	local scroll = new("ScrollingFrame", {
+		Position = UDim2.fromOffset(6, 56),
+		Size = UDim2.new(1, -12, 1, -62),
+		BackgroundTransparency = 1,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = THEME.dim,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ZIndex = 61,
+		Parent = f,
+	})
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 1), Parent = scroll })
+	Debug.frame, Debug.scroll, Debug.info = f, scroll, info
+	Debug.order = 0
+
+	local function addRow(e)
+		Debug.order += 1
+		local l = new("TextLabel", {
+			LayoutOrder = Debug.order,
+			Size = UDim2.new(1, -4, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			TextSize = 10,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextColor3 = e.color or THEME.soft,
+			ZIndex = 62,
+			Parent = scroll,
+		})
+		l.Text = string.format("%5.1f  %s", e.t, e.text)
+		local kids = {}
+		for _, c in ipairs(scroll:GetChildren()) do
+			if c:IsA("TextLabel") then table.insert(kids, c) end
+		end
+		if #kids > Debug.max then
+			table.sort(kids, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+			kids[1]:Destroy()
+		end
+		task.defer(function()
+			if scroll.Parent then
+				scroll.CanvasPosition = Vector2.new(0, math.max(0, scroll.AbsoluteCanvasSize.Y - scroll.AbsoluteWindowSize.Y))
+			end
+		end)
+	end
+	for _, e in ipairs(Debug.buf) do addRow(e) end
+	Debug.onAdd = function(e)
+		if f.Visible then addRow(e) end
+	end
+
+	track(closeBtn.Activated:Connect(function()
+		State.settings.Debug = false
+		saveSettings()
+		Debug.setVisible(false)
+	end))
+	track(clearBtn.Activated:Connect(function()
+		Debug.buf = {}
+		for _, c in ipairs(scroll:GetChildren()) do
+			if c:IsA("TextLabel") then c:Destroy() end
+		end
+	end))
+	track(copyBtn.Activated:Connect(function()
+		local lines = {}
+		for _, e in ipairs(Debug.buf) do
+			table.insert(lines, string.format("%.1f %s", e.t, e.text))
+		end
+		copyText(table.concat(lines, "\n"))
+	end))
+
+	local drag
+	track(head.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			drag = { start = input.Position, pos = f.Position }
+		end
+	end))
+	track(UserInputService.InputChanged:Connect(function(input)
+		if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local d = input.Position - drag.start
+			f.Position = UDim2.new(drag.pos.X.Scale, drag.pos.X.Offset + d.X, drag.pos.Y.Scale, drag.pos.Y.Offset + d.Y)
+		end
+	end))
+	track(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			drag = nil
+		end
+	end))
+
+	task.spawn(function()
+		while State.alive and f.Parent do
+			if f.Visible then
+				local ghosts, names = 0, {}
+				for _, g in pairs(Live.ghosts) do
+					ghosts += 1
+					table.insert(names, g.entry and g.entry.name or "?")
+				end
+				local shared = 0
+				for _ in pairs(Live.my) do shared += 1 end
+				info.Text = string.format(
+					"live:%s conn:%s ghosts:%d shared:%d decoy:%s%s",
+					Live.ready() and "on" or "off",
+					Live.connected and "yes" or "no",
+					ghosts, shared,
+					Live.decoy and "yes" or "no",
+					ghosts > 0 and ("\n" .. table.concat(names, ", ")) or ""
+				)
+			end
+			task.wait(0.5)
+		end
+	end)
+end
+
+function Debug.setVisible(v)
+	if v then
+		Debug.build()
+	end
+	if Debug.frame and Debug.frame.Parent then
+		Debug.frame.Visible = v and true or false
+		if v then
+			for _, c in ipairs(Debug.scroll:GetChildren()) do
+				if c:IsA("TextLabel") then c:Destroy() end
+			end
+			Debug.order = 0
+			local old = Debug.onAdd
+			Debug.onAdd = nil
+			for _, e in ipairs(Debug.buf) do
+				Debug.order += 1
+				local l = new("TextLabel", {
+					LayoutOrder = Debug.order,
+					Size = UDim2.new(1, -4, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundTransparency = 1,
+					Font = Enum.Font.Code,
+					TextSize = 10,
+					TextWrapped = true,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					TextColor3 = e.color or THEME.soft,
+					ZIndex = 62,
+					Parent = Debug.scroll,
+				})
+				l.Text = string.format("%5.1f  %s", e.t, e.text)
+			end
+			Debug.onAdd = old
+		end
+	end
+end
+
 local function makeToggle(parent, initial, onChange)
 	local btn = new("TextButton", {
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -2930,7 +3274,7 @@ local function createBrowser(kind)
 	local primary = new("TextButton", {
 		AnchorPoint = Vector2.new(0, 1),
 		Position = UDim2.new(0, 10, 1, -10),
-		Size = UDim2.new(1, -58, 0, 30),
+		Size = UDim2.new(1, -106, 0, 30),
 		BackgroundColor3 = Accent.color,
 		Parent = pv,
 	})
@@ -2983,9 +3327,41 @@ local function createBrowser(kind)
 		for _, s in ipairs(copyParts) do tw(s, { Color = THEME.dim }, 0.15) end
 	end))
 
-	local editBtn = new("TextButton", {
+	local shareBtn = new("TextButton", {
 		AnchorPoint = Vector2.new(1, 1),
 		Position = UDim2.new(1, -46, 1, -10),
+		Size = UDim2.fromOffset(46, 30),
+		BackgroundColor3 = THEME.raised,
+		Parent = pv,
+	})
+	corner(shareBtn, 3)
+	local shareStroke = stroke(shareBtn, THEME.line, 1)
+	local shareLabel = new("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 9,
+		TextColor3 = THEME.dim,
+		Text = "SHARE",
+		Parent = shareBtn,
+	})
+	pressFx(shareBtn)
+	function B.paintShare()
+		local e = B.current
+		local on = e == nil or Live.isShared(e)
+		shareLabel.Text = on and "SHARE" or "HIDDEN"
+		shareLabel.TextColor3 = (e and on) and Accent.color or THEME.dim
+		shareStroke.Color = (e and on) and Accent.color or THEME.line
+	end
+	track(shareBtn.Activated:Connect(function()
+		if not B.current then return end
+		Live.setShare(B.current, not Live.isShared(B.current))
+		B.paintShare()
+	end))
+
+	local editBtn = new("TextButton", {
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -98, 1, -10),
 		Size = UDim2.fromOffset(32, 30),
 		BackgroundColor3 = THEME.raised,
 		Visible = false,
@@ -3014,7 +3390,7 @@ local function createBrowser(kind)
 	end))
 	function B.refreshOwner()
 		editBtn.Visible = Owner.ok
-		primary.Size = UDim2.new(1, Owner.ok and -94 or -58, 0, 30)
+		primary.Size = UDim2.new(1, Owner.ok and -142 or -106, 0, 30)
 	end
 
 	--// painting
@@ -3037,6 +3413,7 @@ local function createBrowser(kind)
 		apply(primary, { BackgroundColor3 = bg }, instant)
 		apply(primaryLabel, { TextColor3 = fg }, instant)
 		apply(primaryStroke, { Color = st }, instant)
+		if B.paintShare then B.paintShare() end
 	end
 	B.paintPrimary = paintPrimary
 
@@ -3589,6 +3966,15 @@ local function createSettings()
 		State.settings.Live = v
 		saveSettings()
 		Live.setEnabled(v)
+	end)
+	makeToggle(row("Silence console", "power and weapon print/warn go to the debug panel"), State.settings.Quiet, function(v)
+		State.settings.Quiet = v
+		saveSettings()
+	end)
+	makeToggle(row("Live debug", "floating panel with live sync status and logs"), State.settings.Debug, function(v)
+		State.settings.Debug = v
+		saveSettings()
+		Debug.setVisible(v)
 	end)
 	makeToggle(row("Receive effects", "other players' powers push or freeze you, no damage"), State.settings.Impact, function(v)
 		State.settings.Impact = v
@@ -4809,6 +5195,9 @@ local function main()
 	UI.switchTo("Powers", true)
 	UI.refreshFooter()
 	UI.setOpen(true)
+	if State.settings.Debug then
+		Debug.setVisible(true)
+	end
 	creditNotifications()
 	task.spawn(UI.populate)
 	local okLive, errLive = pcall(Live.start)
@@ -4838,6 +5227,6 @@ end
 
 local ok, err = pcall(main)
 if not ok then
-	warn("[spells] " .. tostring(err))
+	Debug.err("boot: " .. tostring(err))
 	notify("spells error", tostring(err))
 end
