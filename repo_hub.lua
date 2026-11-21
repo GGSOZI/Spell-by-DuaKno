@@ -147,7 +147,7 @@ local State = {
 	spin = nil,
 	binding = false,
 	toggleKey = Enum.KeyCode.RightShift,
-	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, ImpactPower = 0.5, Quiet = true, Debug = false, NoShare = {}, ToggleKey = "RightShift" },
+	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, ImpactPower = 0.5, SelfGuard = true, Quiet = true, Debug = false, NoShare = {}, ToggleKey = "RightShift" },
 }
 
 local Live = { ghosts = {}, starting = {}, my = {}, outbox = {}, sent = {}, seen = {}, hbs = {}, beat = 0, seq = 0, toolOwner = setmetatable({}, { __mode = "k" }) }
@@ -240,6 +240,10 @@ local function loadSettings()
 			end
 		end
 		State.settings.Scale = math.clamp(State.settings.Scale, 0.8, 1.3)
+		State.settings.ImpactPower = math.clamp(State.settings.ImpactPower, 0.1, 1)
+		if type(State.settings.NoShare) ~= "table" then
+			State.settings.NoShare = {}
+		end
 		local kc = Enum.KeyCode[State.settings.ToggleKey]
 		if kc then
 			State.toggleKey = kc
@@ -1790,6 +1794,7 @@ function Live.stopGhost(key)
 		pcall(function() inst:Destroy() end)
 	end
 	Live.camGuard()
+	Live.decoyRelease()
 	Live.decoyCheck()
 end
 
@@ -1871,7 +1876,7 @@ function Live.decoyBuild()
 	vf.Force = Vector3.new(0, droot.AssemblyMass * workspace.Gravity, 0)
 	vf.Parent = droot
 
-	local d = { model = model, root = droot, hum = dhum, char = char, conns = {}, orig = {}, applied = {}, parts = {}, born = os.clock(), inj = Vector3.zero, push = 0 }
+	local d = { model = model, root = droot, hum = dhum, char = char, conns = {}, orig = {}, applied = {}, parts = {}, born = os.clock(), inj = Vector3.zero, push = 0, pushStart = 0, cool = 0, at = {}, ign = {} }
 	for _, part in ipairs(model:GetDescendants()) do
 		if part:IsA("BasePart") then
 			table.insert(d.parts, part)
@@ -1904,19 +1909,28 @@ function Live.decoyBuild()
 		local now = os.clock()
 		if not droot.Anchored and now - d.born > 0.4 then
 			local dv = droot.AssemblyLinearVelocity - d.v0
-			if dv.Magnitude > 2 then
-				dv = dv * power
-				if dv.Magnitude > 45 then
-					dv = dv.Unit * 45
+			if dv.Magnitude > 2 and now >= d.cool then
+				if now - d.push > 0.3 then
+					d.pushStart = now
 				end
-				local total = d.inj + dv
-				if total.Magnitude > 70 then
-					total = total.Unit * 70
-					dv = total - d.inj
+				if now - d.pushStart > 2.5 then
+					-- an effect that keeps pushing for seconds is stuck or looping: stop feeding it to you for a moment
+					d.cool = now + 1
+					d.pushStart = now + 1
+				else
+					dv = dv * power
+					if dv.Magnitude > 45 then
+						dv = dv.Unit * 45
+					end
+					local total = d.inj + dv
+					if total.Magnitude > 70 then
+						total = total.Unit * 70
+						dv = total - d.inj
+					end
+					rr.AssemblyLinearVelocity = rr.AssemblyLinearVelocity + dv
+					d.inj = total
+					d.push = now
 				end
-				rr.AssemblyLinearVelocity = rr.AssemblyLinearVelocity + dv
-				d.inj = total
-				d.push = now
 			end
 			local dp = droot.Position - rr.Position
 			if dp.Magnitude > 1.5 then
@@ -1934,6 +1948,10 @@ function Live.decoyBuild()
 				d.inj = Vector3.zero
 			elseif now - d.push > 0.12 then
 				local cut = d.inj * (1 - 0.88 ^ (dt * 60))
+				local lim = v.Magnitude * 0.5
+				if cut.Magnitude > lim then
+					cut = cut.Unit * lim
+				end
 				rr.AssemblyLinearVelocity = v - cut
 				d.inj = d.inj - cut
 			end
@@ -1944,6 +1962,22 @@ function Live.decoyBuild()
 			d.inj = Vector3.zero
 		end
 		local frozen = droot.Anchored
+		if frozen and now < (d.noFreezeUntil or 0) then
+			for _, part in ipairs(d.parts) do
+				part.Anchored = false
+			end
+			frozen = false
+		elseif frozen and now - (d.frozenAt or now) > 6 then
+			-- a freeze never lasts forever: force it off and ignore re-freezes for a moment
+			for _, part in ipairs(d.parts) do
+				part.Anchored = false
+			end
+			d.noFreezeUntil = now + 4
+			frozen = false
+		end
+		if frozen and not d.frozen then
+			d.frozenAt = now
+		end
 		if frozen ~= (d.frozen or false) then
 			d.frozen = frozen
 			rr.Anchored = frozen
@@ -1951,20 +1985,114 @@ function Live.decoyBuild()
 		for _, f in ipairs(Live.decoyFields) do
 			local mine, real = dhum[f], rh[f]
 			if d.applied[f] == nil then
-				if mine ~= real then
+				if mine ~= real and now >= (d.ign[f] or 0) then
 					d.orig[f] = real
 					d.applied[f] = true
+					d.at[f] = now
 					rh[f] = mine
 				end
 			elseif mine == d.orig[f] then
 				rh[f] = d.orig[f]
 				d.applied[f] = nil
 				d.orig[f] = nil
+			elseif now - (d.at[f] or now) > 6 then
+				-- a stun / slow / stand never lasts more than 6s, even if the effect forgot to undo it
+				rh[f] = d.orig[f]
+				pcall(function() dhum[f] = d.orig[f] end)
+				d.applied[f] = nil
+				d.orig[f] = nil
+				d.ign[f] = now + 4
 			else
 				rh[f] = mine
 			end
 		end
 	end))
+end
+
+Live.qs = setmetatable({}, { __mode = "k" })
+
+-- real character is not hit by raycasts / region queries while powers run, so lasers and shots hit the double (or nothing), not you
+function Live.shield(on)
+	local char = Players.LocalPlayer.Character
+	if on and char then
+		for _, part in ipairs(char:GetDescendants()) do
+			if part:IsA("BasePart") and Live.qs[part] == nil then
+				Live.qs[part] = part.CanQuery
+				part.CanQuery = false
+			end
+		end
+	elseif not on then
+		for part, v in pairs(Live.qs) do
+			pcall(function() part.CanQuery = v end)
+			Live.qs[part] = nil
+		end
+	end
+end
+
+-- your own powers cannot freeze, stun or root you. freezes from other hub players still go through the double
+function Live.guardTick()
+	local mine = State.settings.SelfGuard == true and Runner.count() > 0
+	Live.shield(mine or Live.decoy ~= nil)
+	if not mine then
+		Live.sgNorm = nil
+		return
+	end
+	local rr, rh = Live.realRoot(), Live.realHum()
+	if not rr or not rh or rh.Health <= 0 then return end
+	local d = Live.decoy
+	local n = Live.sgNorm
+	if not n or n.hum ~= rh then
+		n = { hum = rh, ws = rh.WalkSpeed, jp = rh.JumpPower, jh = rh.JumpHeight }
+		Live.sgNorm = n
+	end
+	local ap = d and d.applied or {}
+	if not (d and d.frozen) and rr.Anchored then
+		rr.Anchored = false
+	end
+	if not ap.PlatformStand and rh.PlatformStand then
+		rh.PlatformStand = false
+	end
+	if not ap.WalkSpeed then
+		if rh.WalkSpeed >= 8 then
+			n.ws = rh.WalkSpeed
+		elseif n.ws >= 8 then
+			rh.WalkSpeed = n.ws
+		end
+	end
+	if rh.UseJumpPower then
+		if not ap.JumpPower then
+			if rh.JumpPower > 0 then
+				n.jp = rh.JumpPower
+			elseif n.jp > 0 then
+				rh.JumpPower = n.jp
+			end
+		end
+	elseif not ap.JumpHeight then
+		if rh.JumpHeight > 0 then
+			n.jh = rh.JumpHeight
+		elseif n.jh > 0 then
+			rh.JumpHeight = n.jh
+		end
+	end
+end
+
+function Live.decoyRelease()
+	local d = Live.decoy
+	if not d then return end
+	for _, part in ipairs(d.parts) do
+		pcall(function() part.Anchored = false end)
+	end
+	local rh, rr = Live.realHum(), Live.realRoot()
+	if rr and d.frozen then
+		pcall(function() rr.Anchored = false end)
+	end
+	d.frozen = false
+	if rh then
+		for f, orig in pairs(d.orig) do
+			pcall(function() rh[f] = orig end)
+		end
+	end
+	d.applied, d.orig, d.inj = {}, {}, Vector3.zero
 end
 
 function Live.decoyCheck()
@@ -2137,6 +2265,7 @@ end
 
 function Live.shutdown()
 	pcall(Live.stopAllGhosts)
+	pcall(Live.shield, false)
 	pcall(Live.decoyStop)
 	if CONFIG.Firebase and CONFIG.Firebase.Url ~= "" and httpRequest then
 		pcall(Live.clearMine)
@@ -3914,6 +4043,10 @@ local function createSettings()
 		saveSettings()
 		Live.setEnabled(v)
 	end)
+	makeToggle(row("Protect me", "your own powers can't hit, freeze or stun you"), State.settings.SelfGuard, function(v)
+		State.settings.SelfGuard = v
+		saveSettings()
+	end)
 	makeToggle(row("Silence console", "power and weapon print/warn go to the debug panel"), State.settings.Quiet, function(v)
 		State.settings.Quiet = v
 		saveSettings()
@@ -5147,6 +5280,12 @@ local function main()
 	UI.relayout()
 	UI.switchTo("Powers", true)
 	UI.refreshFooter()
+	task.spawn(function()
+		while State.alive do
+			pcall(Live.guardTick)
+			task.wait(0.15)
+		end
+	end)
 	UI.setOpen(true)
 	if State.settings.Debug then
 		Debug.setVisible(true)
