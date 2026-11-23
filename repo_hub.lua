@@ -1,4 +1,4 @@
---// SPELLS HUB // powers + weapons // by DuaKNo
+--// POWER/WEAPON TOOLS HUB // powers + weapons // by DuaKNo
 --// v3: custom firebase fx layer (SpellsFx) replaces the old ghost replay. powers push softly, nothing kills
 --// v2: ability emblems, per-ability accent, owner editor (rename + set ability) with live npoint sync
 --// client side executor gui. save as "repo_hub.lua" in the repo root, the scan skips it
@@ -2055,7 +2055,19 @@ local function signalList()
 	end)
 	pcall(function() add(RunService.PreSimulation) end)
 	pcall(function() add(RunService.PostSimulation) end)
+	pcall(function() add(RunService.PreRender) end)
+	pcall(function() add(RunService.PreAnimation) end)
 	pcall(function()
+		add(workspace.DescendantAdded)
+		add(workspace.ChildAdded)
+		add(Players.PlayerAdded)
+		add(Players.PlayerRemoving)
+	end)
+	pcall(function()
+		add(UserInputService.TouchStarted)
+		add(UserInputService.TouchEnded)
+		add(UserInputService.TouchMoved)
+		add(UserInputService.TouchTap)
 		add(UserInputService.InputBegan)
 		add(UserInputService.InputEnded)
 		add(UserInputService.InputChanged)
@@ -2069,7 +2081,16 @@ local function signalList()
 		local mouse = lp:GetMouse()
 		add(mouse.Button1Down)
 		add(mouse.Button1Up)
+		add(mouse.Button2Down)
+		add(mouse.Button2Up)
 		add(mouse.Move)
+		add(mouse.KeyDown)
+		add(mouse.KeyUp)
+		local bp = lp:FindFirstChildOfClass("Backpack")
+		if bp then
+			add(bp.ChildAdded)
+			add(bp.ChildRemoved)
+		end
 		local ch = lp.Character
 		if ch then
 			local hum = ch:FindFirstChildOfClass("Humanoid")
@@ -2078,8 +2099,10 @@ local function signalList()
 				add(hum.StateChanged)
 				add(hum.Running)
 				add(hum.Jumping)
+				add(hum.HealthChanged)
 			end
 			add(ch.DescendantAdded)
+			add(ch.ChildAdded)
 		end
 	end)
 	return sigs
@@ -2123,6 +2146,110 @@ local function killThreads(src)
 	end
 end
 
+--// camera + character state, so a stopped script cannot leave you frozen or zoomed
+local function captureWorld()
+	local w = {}
+	local cam = workspace.CurrentCamera
+	if cam then
+		w.fov, w.camType, w.subject = cam.FieldOfView, cam.CameraType, cam.CameraSubject
+	end
+	local ch = Players.LocalPlayer.Character
+	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+	if hum then
+		w.hum = hum
+		w.ws, w.jp, w.jh = hum.WalkSpeed, hum.JumpPower, hum.JumpHeight
+	end
+	return w
+end
+
+local function restoreWorld(w)
+	if not w then return end
+	local cam = workspace.CurrentCamera
+	if cam and w.fov then
+		pcall(function()
+			cam.FieldOfView = w.fov
+			cam.CameraType = w.camType
+			if w.subject and w.subject.Parent then
+				cam.CameraSubject = w.subject
+			end
+		end)
+	end
+	local hum = w.hum
+	if hum and hum.Parent then
+		pcall(function()
+			local root = hum.Parent:FindFirstChild("HumanoidRootPart")
+			if hum.WalkSpeed == 0 and (w.ws or 0) > 0 then
+				hum.WalkSpeed = w.ws
+				if (w.jp or 0) > 0 then hum.JumpPower = w.jp end
+				if (w.jh or 0) > 0 then hum.JumpHeight = w.jh end
+				hum.AutoRotate = true
+				if root and root.Anchored then root.Anchored = false end
+			end
+		end)
+	end
+end
+
+--// gives the script its own Instance.new and task.* that record what it makes. everything else passes straight through.
+local function sandbox(fn, run)
+	if not (getfenv and setfenv) then return false end
+	local okBase, base = pcall(getfenv, fn)
+	if not okBase or type(base) ~= "table" then return false end
+
+	local realTask, realInstance = task, Instance
+	local made = 0
+
+	local function keep(th)
+		if th then run.threads[th] = true end
+		return th
+	end
+
+	local taskProxy = setmetatable({
+		spawn = function(f, ...) return keep(realTask.spawn(f, ...)) end,
+		defer = function(f, ...) return keep(realTask.defer(f, ...)) end,
+		delay = function(t, f, ...) return keep(realTask.delay(t, f, ...)) end,
+	}, { __index = realTask })
+
+	local function prune()
+		local now = os.clock()
+		for inst, born in pairs(run.instances) do
+			local ok, parent = pcall(function() return inst.Parent end)
+			if not ok or (parent == nil and now - born > 5) then
+				run.instances[inst] = nil
+			end
+		end
+	end
+
+	local instProxy = setmetatable({
+		new = function(class, parent)
+			local inst = realInstance.new(class)
+			run.instances[inst] = os.clock()
+			made += 1
+			if made % 1000 == 0 then
+				realTask.defer(prune)
+			end
+			if parent ~= nil then
+				inst.Parent = parent
+			end
+			return inst
+		end,
+	}, { __index = realInstance })
+
+	local env = setmetatable({ task = taskProxy, Instance = instProxy }, { __index = base, __newindex = base })
+	return (pcall(setfenv, fn, env))
+end
+
+local function destroyAll(set)
+	for inst in pairs(set) do
+		pcall(function()
+			if inst:IsA("Sound") then inst:Stop() end
+			if inst:IsA("ParticleEmitter") then inst.Enabled = false end
+		end)
+	end
+	for inst in pairs(set) do
+		pcall(function() inst:Destroy() end)
+	end
+end
+
 local function finalizeRun(run)
 	if run.finalized then return end
 	run.finalized = true
@@ -2139,13 +2266,21 @@ local function stopRun(run)
 	State.runs[run.entry.path] = nil
 	pcall(Fx.unregisterPath, run.entry.path)
 	finalizeRun(run)
-	for _, th in ipairs(run.threads) do
+	run.stopped = true
+	-- 1. stop every loop the script started
+	for th in pairs(run.threads) do
 		pcall(task.cancel, th)
 	end
 	killThreads(run.source)
+	-- 2. cut its events so nothing re-triggers
 	killConnections(run.source)
-	for inst in pairs(run.created) do
-		pcall(function() inst:Destroy() end)
+	-- 3. remove everything it created
+	destroyAll(run.instances)
+	destroyAll(run.created)
+	run.instances, run.created = {}, {}
+	-- 4. put camera + character back, unless another script is still running
+	if next(State.runs) == nil then
+		restoreWorld(run.world)
 	end
 end
 
@@ -2197,7 +2332,7 @@ function Runner.run(entry)
 	if not src then
 		Runner.busy, Runner.busyPath = false, nil
 		status("fetch failed: " .. entry.name, THEME.bad)
-		notify("Spells", "failed to fetch " .. entry.name)
+		notify("Tools Hub", "failed to fetch " .. entry.name)
 		fire()
 		return
 	end
@@ -2206,7 +2341,7 @@ function Runner.run(entry)
 	if not fn then
 		Runner.busy, Runner.busyPath = false, nil
 		status("compile error: " .. entry.name, THEME.bad)
-		notify("Spells", "compile error in " .. entry.name)
+		notify("Tools Hub", "compile error in " .. entry.name)
 		Debug.err("compile " .. entry.name .. ": " .. tostring(compileErr))
 		fire()
 		return
@@ -2220,12 +2355,17 @@ function Runner.run(entry)
 
 	local run = {
 		entry = entry,
-		threads = {},
+		threads = setmetatable({}, { __mode = "k" }),
+		instances = {}, -- strong on purpose: a weak table can lose live instances
 		created = {},
 		before = snapshot(),
+		world = captureWorld(),
 		source = chunkSource(fn),
 		finalized = false,
 	}
+	if not sandbox(fn, run) then
+		Debug.add("this executor has no setfenv, cleanup uses the basic mode")
+	end
 	State.runs[entry.path] = run
 	Fx.currentPath = entry.path
 	Fx.viewerOnly = false
@@ -2237,11 +2377,11 @@ function Runner.run(entry)
 			status("running " .. entry.name, THEME.good)
 		else
 			status("runtime error: " .. entry.name, THEME.bad)
-			notify("Spells", "runtime error in " .. entry.name)
+			notify("Tools Hub", "runtime error in " .. entry.name)
 			Debug.err("runtime " .. entry.name .. ": " .. tostring(runErr))
 		end
 	end)
-	table.insert(run.threads, th)
+	run.threads[th] = true
 
 	task.delay(CONFIG.SettleTime, function()
 		if State.runs[entry.path] == run then
@@ -2347,7 +2487,7 @@ function FxGlue.start()
 				FxGlue.lastStatus = st
 				Debug.add("fx: " .. tostring(st), st == "connected" and THEME.good or nil)
 				if string.find(st, "error") or string.find(st, "no response") then
-					notify("Spells fx", st)
+					notify("Tools Hub fx", st)
 				end
 			end
 			if not Fx.ready() and not FxGlue.warnedOff then
@@ -4637,13 +4777,19 @@ local function buildUI()
 		ZIndex = 6,
 		Parent = header,
 	})
+	local function paintTitle()
+		local w = UI.uw or CONFIG.WindowWidth
+		local name = w >= 470 and "POWER/WEAPON TOOLS HUB" or (w >= 380 and "TOOLS HUB" or "TOOLS")
+		title.Text = string.format(
+			'%s <font color="#%s">//</font> <font size="9" color="#%s">DUAKNO</font>',
+			name, hex(Accent.color), hex(THEME.dim)
+		)
+	end
+	UI.paintTitle = paintTitle
 	Accent.bind(function(c)
 		markStroke.Color = c
 		markDot.BackgroundColor3 = c
-		title.Text = string.format(
-			'SPELLS <font color="#%s">//</font> <font size="9" color="#%s">DUAKNO</font>',
-			hex(c), hex(THEME.dim)
-		)
+		paintTitle()
 	end)
 
 	new("Frame", { Position = UDim2.new(0, 0, 1, -1), Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = THEME.line, ZIndex = 6, Parent = header })
@@ -4995,6 +5141,7 @@ function UI.relayout()
 	for _, b in pairs(UI.browsers) do
 		b.layout(uw - SIDE, uh - HEADER - FOOTER)
 	end
+	if UI.paintTitle then UI.paintTitle() end
 end
 
 function UI.setOpen(open)
@@ -5277,7 +5424,7 @@ local function main()
 	task.spawn(UI.populate)
 	local okFx, errFx = pcall(FxGlue.start)
 	if not okFx then
-		notify("Spells fx", "start error: " .. tostring(errFx))
+		notify("Tools Hub fx", "start error: " .. tostring(errFx))
 	end
 
 	task.spawn(function()
@@ -5302,5 +5449,5 @@ end
 local ok, err = pcall(main)
 if not ok then
 	Debug.err("boot: " .. tostring(err))
-	notify("spells error", tostring(err))
+	notify("Tools Hub error", tostring(err))
 end
