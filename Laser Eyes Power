@@ -917,16 +917,24 @@ local function onAction(_, state)
 	return Enum.ContextActionResult.Sink
 end
 
-local function bindButton()
-	CAS:UnbindAction(ACTION)
-	CAS:BindAction(ACTION, onAction, true, CFG.Key) -- true = on-screen touch button (key still works on PC)
-	CAS:SetTitle(ACTION, "LASER")
+local boundTool = nil
+
+local function bindButton(tool)
+	boundTool = tool
+	CAS:BindAction(ACTION, onAction, true, CFG.Key) -- rebinding the same name replaces it, no unbind needed
+	CAS:SetTitle(ACTION, os.clock() < cdUntil and "WAIT" or "LASER")
 	CAS:SetPosition(ACTION, UDim2.new(1, -120, 1, -220))
-	local b = CAS:GetButton(ACTION)
-	if b then b.Size = UDim2.fromOffset(90, 90) end
+	task.defer(function()
+		if boundTool ~= tool then return end
+		local b = CAS:GetButton(ACTION)
+		if b then b.Size = UDim2.fromOffset(90, 90) end
+	end)
 end
 
-local function unbindButton()
+-- only the tool that owns the binding may remove it, so a late Unequipped/Destroying from another tool can't wipe it
+local function unbindButton(tool)
+	if tool ~= nil and boundTool ~= tool then return end
+	boundTool = nil
 	holding = false
 	CAS:UnbindAction(ACTION)
 end
@@ -939,17 +947,38 @@ local function makeTool()
 	t.CanBeDropped = false
 	t.Activated:Connect(startHold)
 	t.Deactivated:Connect(function() holding = false end)
-	t.Equipped:Connect(bindButton)
-	t.Unequipped:Connect(unbindButton)
-	t.Destroying:Connect(unbindButton)
+	t.Equipped:Connect(function() bindButton(t) end)
+	t.Unequipped:Connect(function() unbindButton(t) end)
+	t.Destroying:Connect(function() unbindButton(t) end)
+	-- watchdog: keeps the button in sync with the real equipped state even if an event arrives late or out of order
+	task.spawn(function()
+		task.wait()
+		while t.Parent do
+			local held = lp.Character ~= nil and t.Parent == lp.Character
+			if held and boundTool ~= t then
+				bindButton(t)
+			elseif not held and boundTool == t then
+				unbindButton(t)
+			end
+			task.wait(0.25)
+		end
+	end)
 	return t
 end
 
 local function give()
 	local bp = lp:WaitForChild("Backpack")
-	if bp:FindFirstChild("Laser Eyes") or (lp.Character and lp.Character:FindFirstChild("Laser Eyes")) then return end
+	-- remove leftovers from an earlier run so the tool you hold always belongs to this run
+	for _, root in ipairs({ bp, lp.Character }) do
+		if root then
+			for _, c in ipairs(root:GetChildren()) do
+				if c:IsA("Tool") and c.Name == "Laser Eyes" then pcall(function() c:Destroy() end) end
+			end
+		end
+	end
 	makeTool().Parent = bp
 end
+pcall(function() CAS:UnbindAction(ACTION) end)
 give()
 lp.CharacterAdded:Connect(function()
 	unbindButton()
