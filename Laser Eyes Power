@@ -106,6 +106,8 @@ local CFG = {
 	EyeScale = 0.12,     -- emitter size at the eyes (originals are huge, e.g. ChargeFire = 60)
 	BeamWidth = 3,
 	KillRadius = 8,
+	NPCDrainTime = 5,    -- seconds of beam on an NPC (at power 1) to drain all its health, then it dies
+	NPCRegenAfter = 6,   -- seconds out of the beam before an NPC's drained health resets
 	BurnLinger = 4,      -- fire stays on the NPC this long after you stop hitting it
 	SimRadius = 1000,    -- simulation radius while firing, restored afterwards
 	ShakeCharge = 0.12,  -- camera shake at the end of the charge
@@ -338,6 +340,84 @@ local function ignite(model)
 	return b
 end
 
+-- network ownership: claim physics of everything near the beam so NPC kills replicate to the server
+local function simBoost()
+	pcall(function() sethiddenproperty(lp, "SimulationRadius", math.huge) end)
+	pcall(function() sethiddenproperty(lp, "MaximumSimulationRadius", math.huge) end)
+	pcall(function() lp.MaximumSimulationRadius = math.huge end)
+	pcall(function() if setsimulationradius then setsimulationradius(math.huge, math.huge) end end)
+end
+
+-- ===================== NPC KILL (network ownership) =====================
+-- you own the NPC's physics (simulation radius), so its parts get broken apart and dropped under FallenPartsDestroyHeight.
+-- the server sees them fall, destroys them and the NPC dies. only NPCs: any player model (with or without this script) is skipped
+local killing = setmetatable({}, { __mode = "k" })
+local function killNPC(model)
+	if not model or killing[model] or not model.Parent then return end
+	if Players:GetPlayerFromCharacter(model) then return end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+	killing[model] = true
+	simBoost()
+	task.spawn(function()
+		pcall(function() hum.Health = 0 end)
+		pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
+		pcall(function() model:BreakJoints() end)
+		local parts = {}
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") then
+				parts[#parts + 1] = d
+				pcall(function()
+					d.Anchored = false
+					d.CanCollide = false
+					d.CanTouch = false
+				end)
+			end
+		end
+		local fh = workspace.FallenPartsDestroyHeight
+		local voidY = (fh > -1e5) and (fh - 400) or -1e5
+		local t0 = os.clock()
+		while model.Parent and os.clock() - t0 < 3 do
+			for _, p in ipairs(parts) do
+				if p.Parent then
+					pcall(function()
+						p.AssemblyLinearVelocity = Vector3.new(0, -2000, 0)
+						p.CFrame = CFrame.new(p.Position.X, voidY, p.Position.Z)
+					end)
+				end
+			end
+			RunService.Heartbeat:Wait()
+		end
+		killing[model] = nil
+	end)
+end
+
+-- the beam slowly drains an NPC's health; at 0 it dies. players are never drained
+local hpFrac = setmetatable({}, { __mode = "k" })
+local lastHit = setmetatable({}, { __mode = "k" })
+local function drainNPC(model, power)
+	if killing[model] then return end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum or (hum.Health <= 0 and not hpFrac[model]) then return end
+	local now = os.clock()
+	local last = lastHit[model]
+	lastHit[model] = now
+	local f = hpFrac[model] or 1
+	if last and now - last > CFG.NPCRegenAfter then f = 1 end
+	local dt = last and math.min(now - last, 0.3) or 0.1
+	f -= (dt / CFG.NPCDrainTime) * power
+	hpFrac[model] = f
+	if f <= 0 then
+		hpFrac[model], lastHit[model] = nil, nil
+		killNPC(model)
+		return
+	end
+	local mx = hum.MaxHealth
+	if mx > 0 and mx < 1e6 then
+		pcall(function() hum.Health = math.max(mx * f, 0.5) end)
+	end
+end
+
 local pushedAt = {}
 
 local function hitNPC(model, power)
@@ -363,6 +443,7 @@ local function hitNPC(model, power)
 	end
 	local b = ignite(model)
 	b.last = os.clock()
+	drainNPC(model, power or 1)
 end
 
 local function scanAt(pos, radius, op, seen, power)
@@ -525,6 +606,7 @@ local function fire()
 	local head = char and char:FindFirstChild("Head")
 	if not head then return end
 	busy = true
+	simBoost()
 
 	local folder = Instance.new("Folder")
 	folder.Name = "LaserEyes"
@@ -663,6 +745,7 @@ local function fire()
 				end
 				if now - lastScan >= 0.1 then
 					lastScan = now
+					simBoost()
 					local okS, errS = pcall(scanBeam, head.Position, p, char, folder, power)
 					if not okS then warn("[LaserEyes] scan: " .. tostring(errS)) end
 				end
