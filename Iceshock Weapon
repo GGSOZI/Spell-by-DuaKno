@@ -55,7 +55,7 @@ do
 	function SelfFx.freeze(dur)
 		local ch, hum, root = mine()
 		if not (hum and root) or hum.Health <= 0 or os.clock() < immune then return false end
-		dur = math.clamp(tonumber(dur) or 2, 0.2, 4)
+		dur = math.clamp(tonumber(dur) or 2, 0.2, 8)
 		tok += 1
 		local my = tok
 		if not saved or saved.ch ~= ch then
@@ -105,6 +105,8 @@ local CFG = {
 	maxRange = 1000,
 	freezeTime = 5.5,
 	freezeNPCs = true,
+	killNPCs = true, -- when the ice breaks, the frozen NPC dies (network ownership)
+	playerFreeze = 4, -- how long players are frozen (seconds)
 	shake = true,
 	extraSoundIds = {},
 	soundPray = 74133338551128,
@@ -999,6 +1001,50 @@ local function iceCage(bcf, bsz, lite)
 	end
 end
 
+-- ===================== NPC KILL (network ownership) =====================
+-- you own the NPC's physics (simulation radius), so its parts get broken apart and dropped under FallenPartsDestroyHeight.
+-- the server sees them fall, destroys them and the NPC dies. only NPCs: any player model (with or without this script) is skipped
+local killing = setmetatable({}, { __mode = "k" })
+local function killNPC(model)
+	if not model or killing[model] or not model.Parent then return end
+	if Players:GetPlayerFromCharacter(model) then return end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+	killing[model] = true
+	simBoost()
+	task.spawn(function()
+		pcall(function() hum.Health = 0 end)
+		pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
+		pcall(function() model:BreakJoints() end)
+		local parts = {}
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") then
+				parts[#parts + 1] = d
+				pcall(function()
+					d.Anchored = false
+					d.CanCollide = false
+					d.CanTouch = false
+				end)
+			end
+		end
+		local fh = workspace.FallenPartsDestroyHeight
+		local voidY = (fh > -1e5) and (fh - 400) or -1e5
+		local t0 = os.clock()
+		while model.Parent and os.clock() - t0 < 3 do
+			for _, p in ipairs(parts) do
+				if p.Parent then
+					pcall(function()
+						p.AssemblyLinearVelocity = Vector3.new(0, -2000, 0)
+						p.CFrame = CFrame.new(p.Position.X, voidY, p.Position.Z)
+					end)
+				end
+			end
+			RunService.Heartbeat:Wait()
+		end
+		killing[model] = nil
+	end)
+end
+
 local function freezeNPC(model, from, dur, boom)
 	if frozen[model] then return end
 	local hum = model:FindFirstChildOfClass("Humanoid")
@@ -1057,6 +1103,10 @@ local function freezeNPC(model, from, dur, boom)
 		if boom and explodeFX then pcall(explodeFX, root.Position) end
 		shatterBurst(root.CFrame)
 		flakeBurst(root.Position, 8)
+		if CFG.killNPCs then
+			killNPC(model)
+			return
+		end
 		pcall(function()
 			hum.WalkSpeed = 16
 			hum.JumpHeight = 7.2
@@ -1212,7 +1262,7 @@ end
 -- players near the hit: a real freeze on their own client (a few seconds, then a soft push), ice block shown to everyone.
 -- nothing is damaged. the freeze is capped and expires by itself
 local function hitPlayers(pos, rad, push, skipId)
-	local fdur = 2.5
+	local fdur = CFG.playerFreeze
 	for _, plr in ipairs(FxSafe.players(pos, rad or 14, not push)) do
 		local char = plr.Character
 		local pr = char and char:FindFirstChild("HumanoidRootPart")
@@ -2007,10 +2057,10 @@ local function remotePlay(pkt)
 		iceShockFX(target, true)
 		hitPlayers(target, 14, false, pkt.casterId)
 		if pkt.casterId ~= lp.UserId and SelfFx.near(target, 14) then
-			SelfFx.freeze(2.5)
+			SelfFx.freeze(CFG.playerFreeze)
 			local r0 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
 			local away = r0 and (r0.Position - target) or Vector3.zero
-			task.delay(3.4, function() SelfFx.push(away, 8) end)
+			task.delay(CFG.playerFreeze + 0.9, function() SelfFx.push(away, 8) end)
 		end
 		task.wait(0.55)
 	end)

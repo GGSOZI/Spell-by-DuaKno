@@ -148,7 +148,7 @@ local State = {
 	spin = nil,
 	binding = false,
 	toggleKey = Enum.KeyCode.RightShift,
-	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, ImpactPower = 0.5, Quiet = true, Debug = false, NoShare = {}, ToggleKey = "RightShift" },
+	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, ImpactPower = 0.5, Quiet = true, Debug = false, SimRadius = 0, NoShare = {}, ToggleKey = "RightShift" },
 }
 
 local Fx = (function()
@@ -195,7 +195,7 @@ local Fx = {
 		PushMax = 22,         -- hard cap on the horizontal push speed (studs/s)
 		PushUp = 10,          -- hard cap on the upward push speed
 		PullSpeed = 24,       -- hard cap on the horizontal speed of a pull (studs/s)
-		FreezeMax = 4,        -- longest freeze in seconds
+		FreezeMax = 6,        -- longest freeze in seconds
 		FreezeCooldown = 2,   -- seconds you cannot be frozen again after a freeze ends
 		BurnMax = 6,          -- longest burn (visual only) in seconds
 		MotionMax = 4,        -- longest spin / lift in seconds
@@ -4054,6 +4054,29 @@ local function createBrowser(kind)
 	return B
 end
 
+--// ============================== simulation radius ==============================
+--// SimRadius setting: 0 = off (your original radius is put back), otherwise your real simulation radius is set to it
+local SimR = { orig = nil }
+do
+	pcall(function() SimR.orig = gethiddenproperty(Players.LocalPlayer, "SimulationRadius") end)
+end
+function SimR.set(v)
+	local plr = Players.LocalPlayer
+	pcall(function() sethiddenproperty(plr, "SimulationRadius", v) end)
+	pcall(function() sethiddenproperty(plr, "MaximumSimulationRadius", v) end)
+	pcall(function() plr.MaximumSimulationRadius = v end)
+	pcall(function() if setsimulationradius then setsimulationradius(v, v) end end)
+end
+function SimR.apply()
+	local v = State.settings.SimRadius
+	if type(v) == "number" and v > 0 then
+		SimR.set(v)
+	elseif SimR.orig then
+		SimR.set(SimR.orig)
+		SimR.orig = nil
+	end
+end
+
 --// ============================== settings page ==============================
 
 local function createSettings()
@@ -4196,6 +4219,48 @@ local function createSettings()
 		saveSettings()
 		FxGlue.apply()
 	end)
+	do
+		local r = row("Simulation radius", "0 = off. type a number (1000) or inf, then SET")
+		local box = new("TextBox", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -112, 0.5, 0),
+			Size = UDim2.fromOffset(80, 22),
+			BackgroundColor3 = THEME.raised,
+			ClearTextOnFocus = false,
+			Font = Enum.Font.Code,
+			TextSize = 11,
+			TextColor3 = THEME.text,
+			PlaceholderColor3 = THEME.faint,
+			PlaceholderText = "0 = off",
+			Text = State.settings.SimRadius > 0 and tostring(State.settings.SimRadius) or "",
+			Parent = r,
+		})
+		corner(box, 3)
+		stroke(box, THEME.line, 1)
+		local setBtn = ghostButton(r, "SET", false)
+		setBtn.AnchorPoint = Vector2.new(1, 0.5)
+		setBtn.Position = UDim2.new(1, -14, 0.5, 0)
+		setBtn.Size = UDim2.fromOffset(90, 22)
+		local function commit()
+			local txt = string.lower((box.Text or ""):gsub("%s", ""))
+			local v = tonumber(txt)
+			if txt == "inf" or txt == "max" or txt == "huge" then v = 1e9 end
+			if not v then
+				box.Text = State.settings.SimRadius > 0 and tostring(State.settings.SimRadius) or ""
+				return
+			end
+			v = math.clamp(math.floor(v), 0, 1e9)
+			State.settings.SimRadius = v
+			box.Text = v > 0 and tostring(v) or ""
+			saveSettings()
+			SimR.apply()
+			pcall(notify, "Simulation radius", v > 0 and ("set to " .. tostring(v)) or "off (original restored)")
+		end
+		track(setBtn.Activated:Connect(commit))
+		track(box.FocusLost:Connect(function(enter)
+			if enter then commit() end
+		end))
+	end
 	do
 		local r = row("Toggle key", "show or hide the hub")
 		local keyBtn = ghostButton(r, string.upper(State.toggleKey.Name), false)
@@ -5336,6 +5401,12 @@ end
 local function main()
 	loadSettings()
 	buildUI()
+	task.spawn(function()
+		while State.alive do
+			if State.settings.SimRadius > 0 then SimR.apply() end
+			task.wait(1)
+		end
+	end)
 
 	table.insert(Runner.listeners, function()
 		for _, b in pairs(UI.browsers) do

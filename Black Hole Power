@@ -292,6 +292,50 @@ function U.pushNpc(model, hp)
 	end
 end
 
+-- ===================== NPC KILL (network ownership) =====================
+-- you own the NPC's physics (simulation radius), so its parts get broken apart and dropped under FallenPartsDestroyHeight.
+-- the server sees them fall, destroys them and the NPC dies. only NPCs: any player model (with or without this script) is skipped
+local killing = setmetatable({}, { __mode = "k" })
+function U.killNPC(model)
+	if not model or killing[model] or not model.Parent then return end
+	if Players:GetPlayerFromCharacter(model) then return end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+	killing[model] = true
+	U.claimOwnership()
+	task.spawn(function()
+		pcall(function() hum.Health = 0 end)
+		pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
+		pcall(function() model:BreakJoints() end)
+		local parts = {}
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") then
+				parts[#parts + 1] = d
+				pcall(function()
+					d.Anchored = false
+					d.CanCollide = false
+					d.CanTouch = false
+				end)
+			end
+		end
+		local fh = workspace.FallenPartsDestroyHeight
+		local voidY = (fh > -1e5) and (fh - 400) or -1e5
+		local t0 = os.clock()
+		while model.Parent and os.clock() - t0 < 3 do
+			for _, p in ipairs(parts) do
+				if p.Parent then
+					pcall(function()
+						p.AssemblyLinearVelocity = Vector3.new(0, -2000, 0)
+						p.CFrame = CFrame.new(p.Position.X, voidY, p.Position.Z)
+					end)
+				end
+			end
+			RunService.Heartbeat:Wait()
+		end
+		killing[model] = nil
+	end)
+end
+
 local remoteHoles = {}
 
 local function spawnBlackHole(targetPos, onFinished, remote)
@@ -1084,11 +1128,17 @@ local function spawnBlackHole(targetPos, onFinished, remote)
 				end
 			end
 
+			if not remote then -- every NPC in the blast dies instantly (players are never touched)
+				for _, p in ipairs(found) do
+					local m = U.getNpc(p)
+					if m then U.killNPC(m) end
+				end
+			end
 			for model in pairs(captured) do
 				if model.Parent then
 					local mroot = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
 					if mroot and (mroot.Position - hp).Magnitude <= blastRange then
-						U.pushNpc(model, hp)
+						U.killNPC(model)
 					else
 						local hum = model:FindFirstChildOfClass("Humanoid")
 						if hum then
