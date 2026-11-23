@@ -11,6 +11,82 @@ local lp = Players.LocalPlayer
 local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, status = function() end, cast = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
 local VIEWER = Fx.viewerOnly == true
 local FX_PATH = Fx.currentPath
+-- safe hub calls: an error inside SpellsFx can no longer kill a cast or leave effects stuck
+local FxSafe = {}
+do
+	local warned = {}
+	local function call(k, ...)
+		local f = Fx[k]
+		if type(f) ~= "function" then return nil end
+		local ok, r = pcall(f, ...)
+		if not ok then
+			if not warned[k] then warned[k] = true warn("[SpellsFx." .. tostring(k) .. "] " .. tostring(r)) end
+			return nil
+		end
+		return r
+	end
+	setmetatable(FxSafe, { __index = function(_, k) return function(...) return call(k, ...) end end })
+	function FxSafe.players(...)
+		local r = call("playersInRadius", ...)
+		return type(r) == "table" and r or {}
+	end
+end
+
+-- victim side: when a cast from another script user lands on YOU, your own script applies the effect to your own
+-- character (only players running these scripts ever receive the cast). capped, expires by itself, 1.2s immunity after a freeze
+local SelfFx = {}
+do
+	local tok, saved, immune = 0, nil, 0
+	local function mine()
+		local ch = lp.Character
+		return ch, ch and ch:FindFirstChildOfClass("Humanoid"), ch and ch:FindFirstChild("HumanoidRootPart")
+	end
+	function SelfFx.near(pos, rad)
+		local _, hum, root = mine()
+		return root ~= nil and hum ~= nil and hum.Health > 0 and (root.Position - pos).Magnitude <= rad
+	end
+	function SelfFx.freeze(dur)
+		local ch, hum, root = mine()
+		if not (hum and root) or hum.Health <= 0 or os.clock() < immune then return false end
+		dur = math.clamp(tonumber(dur) or 2, 0.2, 4)
+		tok += 1
+		local my = tok
+		if not saved or saved.ch ~= ch then
+			saved = { ch = ch, ws = hum.WalkSpeed, jp = hum.JumpPower, jh = hum.JumpHeight, ar = hum.AutoRotate }
+		end
+		local untilT = os.clock() + dur
+		task.spawn(function()
+			while my == tok and os.clock() < untilT and ch.Parent and hum.Health > 0 do
+				pcall(function()
+					root.AssemblyLinearVelocity = Vector3.zero
+					root.AssemblyAngularVelocity = Vector3.zero
+					root.Anchored = true
+					hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate = 0, 0, 0, false
+				end)
+				RunService.Heartbeat:Wait()
+			end
+			if my ~= tok then return end
+			local s = saved
+			saved = nil
+			immune = os.clock() + 1.2
+			pcall(function()
+				root.Anchored = false
+				if s and s.ch == ch then
+					hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate = s.ws, s.jp, s.jh, s.ar
+				end
+			end)
+		end)
+		return true
+	end
+	function SelfFxSafe.push(dir, power)
+		local _, hum, root = mine()
+		if not (hum and root) or hum.Health <= 0 then return end
+		local flat = Vector3.new(dir.X, 0, dir.Z)
+		flat = flat.Magnitude > 0.05 and flat.Unit or Vector3.zero
+		power = math.clamp(tonumber(power) or 8, 0, 22)
+		pcall(function() root.AssemblyLinearVelocity = flat * power * 1.5 + Vector3.new(0, power * 0.6, 0) end)
+	end
+end
 local cam = workspace.CurrentCamera
 
 local CFG = {
@@ -271,14 +347,16 @@ local function hitNPC(model, power)
 	if plr == lp then return end
 	if plr then
 		-- players: a real burn effect (everyone sees the fire, no damage) plus a soft push, refreshed about once a second
+		local bp = ignite(model)
+		bp.last = os.clock()
 		local now = os.clock()
 		if now - (pushedAt[plr] or 0) >= 0.8 then
 			pushedAt[plr] = now
-			Fx.status(plr.UserId, "burn", 2.5, nil, "lasereyes")
+			FxSafe.status(plr.UserId, "burn", 2.5, nil, "lasereyes")
 			local root = model:FindFirstChild("HumanoidRootPart")
 			local from = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
 			if root and from then
-				Fx.push(plr.UserId, root.Position - from.Position, 12, "lasereyes")
+				FxSafe.push(plr.UserId, root.Position - from.Position, 12, "lasereyes")
 			end
 		end
 		return
@@ -452,178 +530,183 @@ local function fire()
 	folder.Name = "LaserEyes"
 	folder.Parent = workspace
 
-	local tgt = Instance.new("Part")
-	tgt.Anchored, tgt.CanCollide, tgt.CanQuery, tgt.CanTouch = true, false, false, false
-	tgt.Transparency = 1
-	tgt.Size = Vector3.new(0.5, 0.5, 0.5)
-	tgt.Parent = folder
-	local endAtt = Instance.new("Attachment", tgt)
-
-	local eyes, charge, live, guides, lights, fireBeams = {}, {}, {}, {}, {}, {}
-	for i, x in ipairs({ -0.3, 0.3 }) do
-		local a = Instance.new("Attachment")
-		a.Name = "LaserEye" .. i
-		a.Position = Vector3.new(x, 0.15, -0.55)
-		a.Parent = head
-		eyes[i] = a
-		-- eye glow
-		local l = Instance.new("PointLight")
-		l.Color = Color3.new(1, 0.1, 0.05)
-		l.Range = 14
-		l.Brightness = 0
-		l.Parent = a
-		table.insert(lights, l)
-	end
-
-	-- charge: eye emitters + guide line (animated, pulsing) + reticle at the aim point
-	for _, a in ipairs(eyes) do
-		for _, n in ipairs(EYE_CHARGE) do table.insert(charge, mkEmitter(n, a, CFG.EyeScale)) end
-		for k = 1, 2 do -- 1 = wide glow, 2 = bright core
-			local g = Instance.new("Beam")
-			g.Texture = "rbxassetid://135363279337264"
-			g.TextureMode = E.TextureMode.Stretch
-			g.Color = ColorSequence.new(k == 1 and Color3.new(1, 0.1, 0.05) or Color3.new(1, 0.85, 0.8))
-			g.LightEmission = 1
-			g.LightInfluence = 0
-			g.FaceCamera = true
-			g.Segments = 10
-			g.ZOffset = k
-			g.Width0, g.Width1 = 0.3, 0.3
-			g.Attachment0, g.Attachment1 = a, endAtt
-			g.Parent = folder
-			table.insert(guides, g)
-		end
-	end
-	local reticle = { mkEmitter("ChargeA", endAtt, 0.5), mkEmitter("Almost", endAtt, 0.6) }
-	local chargeRef = {}
-	startChargeSound(head, CFG.ChargeTime, chargeRef)
-	Fx.emit("lasereyes", "charge", { t = CFG.ChargeTime })
-
-	local dt = 1 / 60
+	local eyes, charge, live, guides, lights, fireBeams, reticle = {}, {}, {}, {}, {}, {}, {}
+	local chargeRef, fireSnd = {}, nil
 	local fired = false
-	local sm
-	local function smooth(target)
-		if not sm then sm = target else sm = sm:Lerp(target, 1 - math.exp(-CFG.AimSmooth * dt)) end
-		return sm
-	end
-
 	local baseFov = cam.FieldOfView
-	local t0 = os.clock()
-	while holding and os.clock() - t0 < CFG.ChargeTime do
-		local pr = (os.clock() - t0) / CFG.ChargeTime
-		shake = CFG.ShakeCharge * pr
-		tgt.CFrame = CFrame.new(smooth(aimPoint(char, folder)))
-		cam.FieldOfView = baseFov - CFG.FovZoom * pr
-		for _, l in ipairs(lights) do l.Brightness = 1 + 4 * pr end
-		local pulse = 0.5 + 0.5 * math.sin((os.clock() - t0) * (10 + 14 * pr))
-		for i, g in ipairs(guides) do
-			local glow = (i % 2 == 1)
-			local w = glow and (0.7 + 0.9 * pr) or (0.18 + 0.25 * pr)
-			g.Width0, g.Width1 = w, w
-			g.Transparency = NumberSequence.new(glow and (0.35 + 0.25 * pulse) or 0)
+
+	-- everything that can fail runs inside pcall so the cleanup below ALWAYS runs (no stuck beam / sound / effects)
+	local ok, err = pcall(function()
+		local tgt = Instance.new("Part")
+		tgt.Anchored, tgt.CanCollide, tgt.CanQuery, tgt.CanTouch = true, false, false, false
+		tgt.Transparency = 1
+		tgt.Size = Vector3.new(0.5, 0.5, 0.5)
+		tgt.Parent = folder
+		local endAtt = Instance.new("Attachment", tgt)
+
+		for i, x in ipairs({ -0.3, 0.3 }) do
+			local a = Instance.new("Attachment")
+			a.Name = "LaserEye" .. i
+			a.Position = Vector3.new(x, 0.15, -0.55)
+			a.Parent = head
+			eyes[i] = a
+			local l = Instance.new("PointLight")
+			l.Color = Color3.new(1, 0.1, 0.05)
+			l.Range = 14
+			l.Brightness = 0
+			l.Parent = a
+			table.insert(lights, l)
 		end
-		dt = RunService.Heartbeat:Wait()
-	end
 
-	for _, g in ipairs(guides) do g:Destroy() end
-	for _, e in ipairs(reticle) do e.Enabled = false end
-	for _, e in ipairs(charge) do e.Enabled = false end
-	chargeRef.stop = true
-	if chargeRef.snd then chargeRef.snd:Destroy() end
-
-	-- fire
-	if holding then
-		fired = true
-		shake = CFG.ShakeFire
-		TweenService:Create(cam, TweenInfo.new(0.15), { FieldOfView = baseFov + 6 }):Play() -- punch
 		for _, a in ipairs(eyes) do
-			for _, n in ipairs(EYE_FIRE) do table.insert(live, mkEmitter(n, a, CFG.EyeScale * 2)) end
-			for _, b in ipairs(BEAMS) do
-				local beam = Instance.new("Beam")
-				beam.Texture = b.tex
-				beam.TextureLength = b.len
-				beam.TextureMode = b.mode
-				beam.TextureSpeed = 1
-				beam.Color = ColorSequence.new(b.col)
-				beam.Transparency = seq(b.trans, 1)
-				beam.LightEmission = 1
-				beam.LightInfluence = 0
-				beam.Width0 = b.w * CFG.BeamWidth * 0.5
-				beam.Width1 = b.w * CFG.BeamWidth
-				beam.Segments = 10
-				beam.FaceCamera = true
-				beam.ZOffset = b.z
-				beam.Attachment0, beam.Attachment1 = a, endAtt
-				beam.Parent = folder
-				table.insert(fireBeams, { beam = beam, w0 = beam.Width0, w1 = beam.Width1 })
+			for _, n in ipairs(EYE_CHARGE) do table.insert(charge, mkEmitter(n, a, CFG.EyeScale)) end
+			for k = 1, 2 do
+				local g = Instance.new("Beam")
+				g.Texture = "rbxassetid://135363279337264"
+				g.TextureMode = E.TextureMode.Stretch
+				g.Color = ColorSequence.new(k == 1 and Color3.new(1, 0.1, 0.05) or Color3.new(1, 0.85, 0.8))
+				g.LightEmission = 1
+				g.LightInfluence = 0
+				g.FaceCamera = true
+				g.Segments = 10
+				g.ZOffset = k
+				g.Width0, g.Width1 = 0.3, 0.3
+				g.Attachment0, g.Attachment1 = a, endAtt
+				g.Parent = folder
+				table.insert(guides, g)
 			end
 		end
-		for _, n in ipairs(HIT_FIRE) do table.insert(live, mkEmitter(n, endAtt, HIT_SCALE[n] or 1)) end
-		table.insert(live, mkSparks(endAtt))
-		local fireSnd = playSound(SOUNDS.Fire, head, true)
-		playSound(SOUNDS.Hit, tgt)
-		Fx.emit("lasereyes", "start", { p = Fx.vec(tgt.Position) })
+		reticle[1], reticle[2] = mkEmitter("ChargeA", endAtt, 0.5), mkEmitter("Almost", endAtt, 0.6)
+		startChargeSound(head, CFG.ChargeTime, chargeRef)
+		FxSafe.emit("lasereyes", "charge", { t = CFG.ChargeTime })
 
-		firing = true
-		local t1, lastScan, lastPebble, lastChunk, lastP, lastInst = os.clock(), 0, 0, 0, nil, nil
-		local lastAim, lastSent = 0, nil
-		while holding and char.Parent and os.clock() - t1 < CFG.MaxFire do
-			-- power builds up the longer you hold
-			local power = 1 + (CFG.MaxPower - 1) * math.clamp((os.clock() - t1) / CFG.PowerRamp, 0, 1)
-			local p = smooth(aimPoint(char, folder))
-			local hit = surfaceAt(head.Position, p, char, folder)
-			if hit then p = hit.Position end
-			tgt.CFrame = CFrame.new(p)
-			shake = CFG.ShakeFire * math.sqrt(power)
-			for _, fb in ipairs(fireBeams) do
-				fb.beam.Width0, fb.beam.Width1 = fb.w0 * power, fb.w1 * power
+		local dt = 1 / 60
+		local sm
+		local function smooth(target)
+			if not sm then sm = target else sm = sm:Lerp(target, 1 - math.exp(-CFG.AimSmooth * dt)) end
+			return sm
+		end
+
+		local t0 = os.clock()
+		while holding and char.Parent and os.clock() - t0 < CFG.ChargeTime do
+			local pr = (os.clock() - t0) / CFG.ChargeTime
+			shake = CFG.ShakeCharge * pr
+			tgt.CFrame = CFrame.new(smooth(aimPoint(char, folder)))
+			cam.FieldOfView = baseFov - CFG.FovZoom * pr
+			for _, l in ipairs(lights) do l.Brightness = 1 + 4 * pr end
+			local pulse = 0.5 + 0.5 * math.sin((os.clock() - t0) * (10 + 14 * pr))
+			for i, g in ipairs(guides) do
+				local glow = (i % 2 == 1)
+				local w = glow and (0.7 + 0.9 * pr) or (0.18 + 0.25 * pr)
+				g.Width0, g.Width1 = w, w
+				g.Transparency = NumberSequence.new(glow and (0.35 + 0.25 * pulse) or 0)
 			end
-			for _, l in ipairs(lights) do l.Brightness = 5 * power end
-			local now = os.clock()
-			if now - lastAim >= 0.12 and (not lastSent or (p - lastSent).Magnitude > 1) then
-				lastAim, lastSent = now, p
-				Fx.emit("lasereyes", "aim", { p = Fx.vec(p) })
-			end
-			if now - lastScan >= 0.1 then
-				lastScan = now
-				scanBeam(head.Position, p, char, folder, power)
-			end
-			-- ground effect
-			local moveVel = Vector3.zero
-			if lastP then
-				local v = (p - lastP) / math.max(dt, 1 / 120)
-				v = Vector3.new(v.X, 0, v.Z)
-				moveVel = v.Magnitude > 80 and v.Unit * 80 or v
-			end
-			lastP = p
-			local solid = CFG.GroundFX and hit and isSolid(hit)
-			if solid then
-				-- small pebbles all the time while you drag / hold on a surface
-				if now - lastPebble >= CFG.PebbleEvery then
-					lastPebble = now
-					groundFX(hit, moveVel, false)
-				end
-				-- big chunks only at the moment the beam hits a (new) surface
-				if hit.Instance ~= lastInst and now - lastChunk >= CFG.ChunkEvery then
-					lastChunk = now
-					groundFX(hit, moveVel, true)
-				end
-			end
-			lastInst = solid and hit.Instance or nil
 			dt = RunService.Heartbeat:Wait()
 		end
-		firing = false
-		if fireSnd then fireSnd:Destroy() end
-	end
 
-	-- cleanup (let particles fade out)
-	Fx.emit("lasereyes", "stop", {})
+		for _, g in ipairs(guides) do g:Destroy() end
+		for _, e in ipairs(reticle) do e.Enabled = false end
+		for _, e in ipairs(charge) do e.Enabled = false end
+		chargeRef.stop = true
+		if chargeRef.snd then chargeRef.snd:Destroy() end
+
+		if holding and char.Parent then
+			fired = true
+			shake = CFG.ShakeFire
+			TweenService:Create(cam, TweenInfo.new(0.15), { FieldOfView = baseFov + 6 }):Play()
+			for _, a in ipairs(eyes) do
+				for _, n in ipairs(EYE_FIRE) do table.insert(live, mkEmitter(n, a, CFG.EyeScale * 2)) end
+				for _, b in ipairs(BEAMS) do
+					local beam = Instance.new("Beam")
+					beam.Texture = b.tex
+					beam.TextureLength = b.len
+					beam.TextureMode = b.mode
+					beam.TextureSpeed = 1
+					beam.Color = ColorSequence.new(b.col)
+					beam.Transparency = seq(b.trans, 1)
+					beam.LightEmission = 1
+					beam.LightInfluence = 0
+					beam.Width0 = b.w * CFG.BeamWidth * 0.5
+					beam.Width1 = b.w * CFG.BeamWidth
+					beam.Segments = 10
+					beam.FaceCamera = true
+					beam.ZOffset = b.z
+					beam.Attachment0, beam.Attachment1 = a, endAtt
+					beam.Parent = folder
+					table.insert(fireBeams, { beam = beam, w0 = beam.Width0, w1 = beam.Width1 })
+				end
+			end
+			for _, n in ipairs(HIT_FIRE) do table.insert(live, mkEmitter(n, endAtt, HIT_SCALE[n] or 1)) end
+			table.insert(live, mkSparks(endAtt))
+			fireSnd = playSound(SOUNDS.Fire, head, true)
+			playSound(SOUNDS.Hit, tgt)
+			FxSafe.emit("lasereyes", "start", { p = Fx.vec(tgt.Position) })
+
+			firing = true
+			local t1, lastScan, lastPebble, lastChunk, lastP, lastInst = os.clock(), 0, 0, 0, nil, nil
+			local lastAim, lastSent = 0, nil
+			while holding and char.Parent and os.clock() - t1 < CFG.MaxFire do
+				local power = 1 + (CFG.MaxPower - 1) * math.clamp((os.clock() - t1) / CFG.PowerRamp, 0, 1)
+				local p = smooth(aimPoint(char, folder))
+				local hit = surfaceAt(head.Position, p, char, folder)
+				if hit then p = hit.Position end
+				tgt.CFrame = CFrame.new(p)
+				shake = CFG.ShakeFire * math.sqrt(power)
+				for _, fb in ipairs(fireBeams) do
+					fb.beam.Width0, fb.beam.Width1 = fb.w0 * power, fb.w1 * power
+				end
+				for _, l in ipairs(lights) do l.Brightness = 5 * power end
+				local now = os.clock()
+				if now - lastAim >= 0.12 and (not lastSent or (p - lastSent).Magnitude > 1) then
+					lastAim, lastSent = now, p
+					FxSafe.emit("lasereyes", "aim", { p = Fx.vec(p) })
+				end
+				if now - lastScan >= 0.1 then
+					lastScan = now
+					local okS, errS = pcall(scanBeam, head.Position, p, char, folder, power)
+					if not okS then warn("[LaserEyes] scan: " .. tostring(errS)) end
+				end
+				local moveVel = Vector3.zero
+				if lastP then
+					local v = (p - lastP) / math.max(dt, 1 / 120)
+					v = Vector3.new(v.X, 0, v.Z)
+					moveVel = v.Magnitude > 80 and v.Unit * 80 or v
+				end
+				lastP = p
+				local solid = CFG.GroundFX and hit and isSolid(hit)
+				if solid then
+					if now - lastPebble >= CFG.PebbleEvery then
+						lastPebble = now
+						pcall(groundFX, hit, moveVel, false)
+					end
+					if hit.Instance ~= lastInst and now - lastChunk >= CFG.ChunkEvery then
+						lastChunk = now
+						pcall(groundFX, hit, moveVel, true)
+					end
+				end
+				lastInst = solid and hit.Instance or nil
+				dt = RunService.Heartbeat:Wait()
+			end
+		end
+	end)
+	if not ok then warn("[LaserEyes] " .. tostring(err)) end
+
+	-- cleanup: always runs
+	firing = false
+	holding = false
+	chargeRef.stop = true
+	if chargeRef.snd then pcall(function() chargeRef.snd:Destroy() end) end
+	if fireSnd then pcall(function() fireSnd:Destroy() end) end
+	FxSafe.emit("lasereyes", "stop", {})
 	shake = 0
-	TweenService:Create(cam, TweenInfo.new(0.4), { FieldOfView = baseFov }):Play()
-	for _, l in ipairs(lights) do l:Destroy() end
-	for _, e in ipairs(live) do e.Enabled = false end
+	pcall(function() TweenService:Create(cam, TweenInfo.new(0.4), { FieldOfView = baseFov }):Play() end)
+	for _, g in ipairs(guides) do pcall(function() g:Destroy() end) end
+	for _, l in ipairs(lights) do pcall(function() l:Destroy() end) end
+	for _, group in ipairs({ reticle, charge, live }) do
+		for _, e in ipairs(group) do pcall(function() e.Enabled = false end) end
+	end
 	for _, c in ipairs(folder:GetChildren()) do
-		if c:IsA("Beam") then c:Destroy() end
+		if c:IsA("Beam") then pcall(function() c:Destroy() end) end
 	end
 	for _, a in ipairs(eyes) do Debris:AddItem(a, 4) end
 	Debris:AddItem(folder, 4)
@@ -653,13 +736,46 @@ local function endSession(s)
 	Debris:AddItem(s.folder, 4)
 end
 
+local lastSelfPush = 0
+local function visualBeam(ss, now)
+	local from, to = ss.head.Position, ss.cur
+	local op = OverlapParams.new()
+	op.FilterType = E.RaycastFilterType.Exclude
+	op.FilterDescendantsInstances = { ss.char, ss.folder }
+	local power = 1 + (CFG.MaxPower - 1) * math.clamp((now - ss.fireAt) / CFG.PowerRamp, 0, 1)
+	local n = math.clamp(math.floor((to - from).Magnitude / CFG.BeamStep), 1, 30)
+	local seen = {}
+	for i = 0, n do
+		local r = ((i == n) and CFG.KillRadius or CFG.BeamRadius) * power
+		for _, part in ipairs(workspace:GetPartBoundsInRadius(from:Lerp(to, i / n), r, op)) do
+			local m = part.Parent
+			while m and m ~= workspace do
+				if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then
+					if not seen[m] then
+						seen[m] = true
+						local bb = ignite(m)
+						bb.last = os.clock()
+						if m == lp.Character and now - lastSelfPush >= 0.8 then
+							lastSelfPush = now
+							local root = m:FindFirstChild("HumanoidRootPart")
+							if root then SelfFx.push(root.Position - from, 12) end
+						end
+					end
+					break
+				end
+				m = m.Parent
+			end
+		end
+	end
+end
+
 local function newSession(pkt)
 	local char = pkt.caster and pkt.caster.Character
 	local head = char and char:FindFirstChild("Head")
 	if not head then return nil end
 	local old = sessions[pkt.casterId]
 	if old then endSession(old) end
-	local s = { id = pkt.casterId, head = head, born = os.clock(), last = os.clock(), phase = "charge", emitters = {}, beams = {}, eyes = {}, lights = {} }
+	local s = { id = pkt.casterId, head = head, char = char, born = os.clock(), last = os.clock(), phase = "charge", emitters = {}, beams = {}, eyes = {}, lights = {} }
 	s.folder = Instance.new("Folder")
 	s.folder.Name = "LaserEyesRemote"
 	s.folder.Parent = workspace
@@ -701,6 +817,10 @@ local function newSession(pkt)
 						fb.beam.Width0, fb.beam.Width1 = fb.w0 * power, fb.w1 * power
 					end
 					for _, l in ipairs(ss.lights) do l.Brightness = 5 * power end
+					if now - (ss.scanAt or 0) >= 0.15 then
+						ss.scanAt = now
+						pcall(visualBeam, ss, now)
+					end
 				end
 			end
 		end)
@@ -776,7 +896,7 @@ local function remoteStop()
 	end
 end
 
-Fx.register("lasereyes", { play = remotePlay, stop = remoteStop }, FX_PATH)
+FxSafe.register("lasereyes", { play = remotePlay, stop = remoteStop }, FX_PATH)
 if VIEWER then return end
 
 ----------------------------------------------------------------------

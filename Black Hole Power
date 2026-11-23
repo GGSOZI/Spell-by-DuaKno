@@ -7,6 +7,82 @@ local lp = Players.LocalPlayer
 local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, status = function() end, cast = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
 local VIEWER = Fx.viewerOnly == true
 local FX_PATH = Fx.currentPath
+-- safe hub calls: an error inside SpellsFx can no longer kill a cast or leave effects stuck
+local FxSafe = {}
+do
+	local warned = {}
+	local function call(k, ...)
+		local f = Fx[k]
+		if type(f) ~= "function" then return nil end
+		local ok, r = pcall(f, ...)
+		if not ok then
+			if not warned[k] then warned[k] = true warn("[SpellsFx." .. tostring(k) .. "] " .. tostring(r)) end
+			return nil
+		end
+		return r
+	end
+	setmetatable(FxSafe, { __index = function(_, k) return function(...) return call(k, ...) end end })
+	function FxSafe.players(...)
+		local r = call("playersInRadius", ...)
+		return type(r) == "table" and r or {}
+	end
+end
+
+-- victim side: when a cast from another script user lands on YOU, your own script applies the effect to your own
+-- character (only players running these scripts ever receive the cast). capped, expires by itself, 1.2s immunity after a freeze
+local SelfFx = {}
+do
+	local tok, saved, immune = 0, nil, 0
+	local function mine()
+		local ch = lp.Character
+		return ch, ch and ch:FindFirstChildOfClass("Humanoid"), ch and ch:FindFirstChild("HumanoidRootPart")
+	end
+	function SelfFx.near(pos, rad)
+		local _, hum, root = mine()
+		return root ~= nil and hum ~= nil and hum.Health > 0 and (root.Position - pos).Magnitude <= rad
+	end
+	function SelfFx.freeze(dur)
+		local ch, hum, root = mine()
+		if not (hum and root) or hum.Health <= 0 or os.clock() < immune then return false end
+		dur = math.clamp(tonumber(dur) or 2, 0.2, 4)
+		tok += 1
+		local my = tok
+		if not saved or saved.ch ~= ch then
+			saved = { ch = ch, ws = hum.WalkSpeed, jp = hum.JumpPower, jh = hum.JumpHeight, ar = hum.AutoRotate }
+		end
+		local untilT = os.clock() + dur
+		task.spawn(function()
+			while my == tok and os.clock() < untilT and ch.Parent and hum.Health > 0 do
+				pcall(function()
+					root.AssemblyLinearVelocity = Vector3.zero
+					root.AssemblyAngularVelocity = Vector3.zero
+					root.Anchored = true
+					hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate = 0, 0, 0, false
+				end)
+				RunService.Heartbeat:Wait()
+			end
+			if my ~= tok then return end
+			local s = saved
+			saved = nil
+			immune = os.clock() + 1.2
+			pcall(function()
+				root.Anchored = false
+				if s and s.ch == ch then
+					hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate = s.ws, s.jp, s.jh, s.ar
+				end
+			end)
+		end)
+		return true
+	end
+	function SelfFxSafe.push(dir, power)
+		local _, hum, root = mine()
+		if not (hum and root) or hum.Health <= 0 then return end
+		local flat = Vector3.new(dir.X, 0, dir.Z)
+		flat = flat.Magnitude > 0.05 and flat.Unit or Vector3.zero
+		power = math.clamp(tonumber(power) or 8, 0, 22)
+		pcall(function() root.AssemblyLinearVelocity = flat * power * 1.5 + Vector3.new(0, power * 0.6, 0) end)
+	end
+end
 local U = {}
 local mouse = lp:GetMouse()
 
@@ -220,8 +296,8 @@ local remoteHoles = {}
 
 local function spawnBlackHole(targetPos, onFinished, remote)
 	if not remote then
-		local tp = Fx.playerAt(mouse, 12)
-		Fx.emit("blackhole", "cast", { pos = Fx.vec(targetPos) }, tp and tp.UserId)
+		local tp = FxSafe.playerAt(mouse, 12)
+		FxSafe.emit("blackhole", "cast", { pos = Fx.vec(targetPos) }, tp and tp.UserId)
 	end
 	local folder = Instance.new("Folder")
 	folder.Name = "BlackHole_" .. tostring(math.random(1000, 9999))
@@ -755,11 +831,11 @@ local function spawnBlackHole(targetPos, onFinished, remote)
 		if pullAcc >= 0.5 and not remote then
 			pullAcc = 0
 			local sent = 0
-			for _, plr in ipairs(Fx.playersInRadius(hp, range, false)) do
+			for _, plr in ipairs(FxSafe.players(hp, range, false)) do
 				local pr = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
 				if pr and sent < 6 then
 					sent += 1
-					Fx.status(plr.UserId, "pull", 0.9, { pos = Fx.vec(hp), s = 14 + 10 * a }, "blackhole")
+					FxSafe.status(plr.UserId, "pull", 0.9, { pos = Fx.vec(hp), s = 14 + 10 * a }, "blackhole")
 				end
 			end
 		end
@@ -846,7 +922,7 @@ local function spawnBlackHole(targetPos, onFinished, remote)
 			pullF = d < range and (1 - d / range) ^ 2 or 0
 			intensity = (proximity ^ 1.3 * 0.7 + pullF * 0.3) * (0.35 + 0.65 * a)
 			intensity = math.clamp(intensity * 1.15, 0, 1)
-			if not remote and CONFIG.PullPlayer and d < range and d > 0.05 then
+			if CONFIG.PullPlayer and d < range and d > 0.05 then
 				local u = off / d
 				local f = (1 - d / range) ^ 2
 				local ramp = math.clamp(t / 1.5, 0, 1)
@@ -863,7 +939,7 @@ local function spawnBlackHole(targetPos, onFinished, remote)
 			if myHum and myHum.FloorMaterial ~= Enum.Material.Air then
 				safePos = hrp.Position
 			end
-			if myHum and not remote then
+			if myHum then
 				if d < range * 0.5 then
 					myHum.PlatformStand = true
 					ragdolled = true
@@ -962,7 +1038,7 @@ local function spawnBlackHole(targetPos, onFinished, remote)
 				U.shake(math.clamp(1 - dist / (range * 2), 0, 1) * CONFIG.ExplodeShake)
 			end
 
-			if rootPart and not remote then
+			if rootPart then
 				local poff = rootPart.Position - hp
 				local flat = Vector3.new(poff.X, 0, poff.Z)
 				local pdir = flat.Magnitude > 0.5 and flat.Unit or Vector3.zero
@@ -1024,12 +1100,12 @@ local function spawnBlackHole(targetPos, onFinished, remote)
 			end
 
 			if not remote then
-				for _, plr in ipairs(Fx.playersInRadius(hp, blastRange, false)) do
+				for _, plr in ipairs(FxSafe.players(hp, blastRange, false)) do
 					local pr = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
 					if pr then
 						local off = pr.Position - hp
 						local f = math.clamp(1 - off.Magnitude / blastRange, 0.3, 1)
-						Fx.push(plr.UserId, off, 22 * f, "blackhole")
+						FxSafe.push(plr.UserId, off, 22 * f, "blackhole")
 					end
 				end
 			end
@@ -1041,8 +1117,13 @@ local function spawnBlackHole(targetPos, onFinished, remote)
 		end
 	end
 
+	local errCount = 0
 	conn = RunService.Heartbeat:Connect(function(dt)
-		if not pcall(step, dt) and not fxEnd then
+		local ok, err = pcall(step, dt)
+		if ok then errCount = 0 return end
+		errCount += 1
+		if errCount == 1 then warn("[BlackHole] step error: " .. tostring(err)) end
+		if errCount >= 8 and not fxEnd then
 			F.teardown()
 			if not remote then env.BlackHoleFxClear = nil end
 			F.finish()
@@ -1067,7 +1148,7 @@ local function remoteStop()
 	table.clear(remoteHoles)
 end
 
-Fx.register("blackhole", { play = remotePlay, stop = remoteStop }, FX_PATH)
+FxSafe.register("blackhole", { play = remotePlay, stop = remoteStop }, FX_PATH)
 if VIEWER then return end
 
 local tool

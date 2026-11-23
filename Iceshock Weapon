@@ -18,6 +18,82 @@ local lp = Players.LocalPlayer
 local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, status = function() end, cast = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
 local VIEWER = Fx.viewerOnly == true
 local FX_PATH = Fx.currentPath
+-- safe hub calls: an error inside SpellsFx can no longer kill a cast or leave effects stuck
+local FxSafe = {}
+do
+	local warned = {}
+	local function call(k, ...)
+		local f = Fx[k]
+		if type(f) ~= "function" then return nil end
+		local ok, r = pcall(f, ...)
+		if not ok then
+			if not warned[k] then warned[k] = true warn("[SpellsFx." .. tostring(k) .. "] " .. tostring(r)) end
+			return nil
+		end
+		return r
+	end
+	setmetatable(FxSafe, { __index = function(_, k) return function(...) return call(k, ...) end end })
+	function FxSafe.players(...)
+		local r = call("playersInRadius", ...)
+		return type(r) == "table" and r or {}
+	end
+end
+
+-- victim side: when a cast from another script user lands on YOU, your own script applies the effect to your own
+-- character (only players running these scripts ever receive the cast). capped, expires by itself, 1.2s immunity after a freeze
+local SelfFx = {}
+do
+	local tok, saved, immune = 0, nil, 0
+	local function mine()
+		local ch = lp.Character
+		return ch, ch and ch:FindFirstChildOfClass("Humanoid"), ch and ch:FindFirstChild("HumanoidRootPart")
+	end
+	function SelfFx.near(pos, rad)
+		local _, hum, root = mine()
+		return root ~= nil and hum ~= nil and hum.Health > 0 and (root.Position - pos).Magnitude <= rad
+	end
+	function SelfFx.freeze(dur)
+		local ch, hum, root = mine()
+		if not (hum and root) or hum.Health <= 0 or os.clock() < immune then return false end
+		dur = math.clamp(tonumber(dur) or 2, 0.2, 4)
+		tok += 1
+		local my = tok
+		if not saved or saved.ch ~= ch then
+			saved = { ch = ch, ws = hum.WalkSpeed, jp = hum.JumpPower, jh = hum.JumpHeight, ar = hum.AutoRotate }
+		end
+		local untilT = os.clock() + dur
+		task.spawn(function()
+			while my == tok and os.clock() < untilT and ch.Parent and hum.Health > 0 do
+				pcall(function()
+					root.AssemblyLinearVelocity = Vector3.zero
+					root.AssemblyAngularVelocity = Vector3.zero
+					root.Anchored = true
+					hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate = 0, 0, 0, false
+				end)
+				RunService.Heartbeat:Wait()
+			end
+			if my ~= tok then return end
+			local s = saved
+			saved = nil
+			immune = os.clock() + 1.2
+			pcall(function()
+				root.Anchored = false
+				if s and s.ch == ch then
+					hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate = s.ws, s.jp, s.jh, s.ar
+				end
+			end)
+		end)
+		return true
+	end
+	function SelfFxSafe.push(dir, power)
+		local _, hum, root = mine()
+		if not (hum and root) or hum.Health <= 0 then return end
+		local flat = Vector3.new(dir.X, 0, dir.Z)
+		flat = flat.Magnitude > 0.05 and flat.Unit or Vector3.zero
+		power = math.clamp(tonumber(power) or 8, 0, 22)
+		pcall(function() root.AssemblyLinearVelocity = flat * power * 1.5 + Vector3.new(0, power * 0.6, 0) end)
+	end
+end
 local env = (getgenv and getgenv()) or _G
 if not VIEWER and env.__IceshockStop then pcall(env.__IceshockStop) end
 
@@ -1137,7 +1213,7 @@ end
 -- nothing is damaged. the freeze is capped and expires by itself
 local function hitPlayers(pos, rad, push, skipId)
 	local fdur = 2.5
-	for _, plr in ipairs(Fx.playersInRadius(pos, rad or 14, not push)) do
+	for _, plr in ipairs(FxSafe.players(pos, rad or 14, not push)) do
 		local char = plr.Character
 		local pr = char and char:FindFirstChild("HumanoidRootPart")
 		if pr and plr.UserId ~= skipId then
@@ -1146,10 +1222,10 @@ local function hitPlayers(pos, rad, push, skipId)
 				away = Vector3.new(rng:NextNumber(-1, 1), 0, rng:NextNumber(-1, 1))
 			end
 			if push then
-				Fx.status(plr.UserId, "freeze", fdur, { nv = 1 }, "iceshock")
+				FxSafe.status(plr.UserId, "freeze", fdur, { nv = 1 }, "iceshock")
 				task.delay(fdur + 0.9, function()
 					if pr.Parent then
-						Fx.push(plr.UserId, away, 8, "iceshock")
+						FxSafe.push(plr.UserId, away, 8, "iceshock")
 					end
 				end)
 			end
@@ -1841,7 +1917,7 @@ local function castIce(tool)
 				end
 			end
 			local lockPlayer
-			for _, plr in ipairs(Fx.playersInRadius(target, 18, false)) do
+			for _, plr in ipairs(FxSafe.players(target, 18, false)) do
 				local r = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
 				if r then
 					local d = (r.Position - target).Magnitude
@@ -1849,7 +1925,7 @@ local function castIce(tool)
 				end
 			end
 			if best then target = groundPoint(best.Position, char) end
-			Fx.emit("iceshock", "cast", { pos = Fx.vec(target) }, lockPlayer and lockPlayer.UserId)
+			FxSafe.emit("iceshock", "cast", { pos = Fx.vec(target) }, lockPlayer and lockPlayer.UserId)
 
 			if arms then
 				local t0 = os.clock()
@@ -1930,6 +2006,12 @@ local function remotePlay(pkt)
 		playSound(CFG.soundIce, anchorAt(target, 3), 2)
 		iceShockFX(target, true)
 		hitPlayers(target, 14, false, pkt.casterId)
+		if pkt.casterId ~= lp.UserId and SelfFx.near(target, 14) then
+			SelfFx.freeze(2.5)
+			local r0 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+			local away = r0 and (r0.Position - target) or Vector3.zero
+			task.delay(3.4, function() SelfFx.push(away, 8) end)
+		end
 		task.wait(0.55)
 	end)
 	cleanup()
@@ -1947,7 +2029,7 @@ local function remoteStop()
 	end
 end
 
-Fx.register("iceshock", { play = remotePlay, stop = remoteStop }, FX_PATH)
+FxSafe.register("iceshock", { play = remotePlay, stop = remoteStop }, FX_PATH)
 if VIEWER then return end
 
 local function giveTool(tpl, handler)
