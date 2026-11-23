@@ -163,6 +163,11 @@ local Fx = (function()
 --//   Fx.emit(id, kind, data, targetUserId)       -- data = plain table of numbers / strings / bools / Fx.vec()
 --//   Fx.push(targetUserId, dir, strength, id)    -- soft push on another player (their own client applies it)
 --//   Fx.softPush(root, dir, strength)            -- soft push on a local part
+--//   Fx.status(targetUserId, name, seconds, data, id)   -- real effect on the target's own client, capped, no damage
+--//        names: freeze burn pull spin lift slow glow shock blind shake
+--//   Fx.cast(id, pos, { radius, target, freeze, burn, pull, push, spin, lift, slow, glow, shock, blind, shake })   -- emit + effects on every player in range, one call
+--//        spin = angular speed (rad/s) + spinRadius + spinUp + spinTime  (tornado) | lift = rise speed + liftTime | slow = seconds + slowFactor
+--//        glow = seconds + glowColor = {r,g,b} 0-255 | shock / blind / shake = seconds
 --//   Fx.playerAt(mouse) / Fx.playersInRadius(pos, radius)
 --//   Fx.vec(v3) / Fx.unvec(tbl)
 --//   Fx.viewerOnly / Fx.currentPath               -- read both at the very top of your script (before any yield). viewerOnly is true when a script is loaded only to replay for others
@@ -170,6 +175,8 @@ local Fx = (function()
 local cloneref = cloneref or function(x) return x end
 local Players = cloneref(game:GetService("Players"))
 local HttpService = cloneref(game:GetService("HttpService"))
+local RunService = cloneref(game:GetService("RunService"))
+local Lighting = cloneref(game:GetService("Lighting"))
 
 local genv = (getgenv and getgenv()) or _G
 if genv.SpellsFx and genv.SpellsFx.stop then
@@ -184,9 +191,20 @@ local Fx = {
 		Auth = nil,           -- optional database secret / token
 		Poll = 0.5,           -- seconds between polls
 		Ttl = 20,             -- seconds an event lives before its sender deletes it
-		MaxPerSec = 14,       -- events accepted per sender per second
-		PushMax = 26,         -- hard cap on the horizontal push speed (studs/s)
-		PushUp = 12,          -- hard cap on the upward push speed
+		MaxPerSec = 30,       -- events accepted per sender per second
+		PushMax = 22,         -- hard cap on the horizontal push speed (studs/s)
+		PushUp = 10,          -- hard cap on the upward push speed
+		PullSpeed = 24,       -- hard cap on the horizontal speed of a pull (studs/s)
+		FreezeMax = 4,        -- longest freeze in seconds
+		FreezeCooldown = 2,   -- seconds you cannot be frozen again after a freeze ends
+		BurnMax = 6,          -- longest burn (visual only) in seconds
+		MotionMax = 4,        -- longest spin / lift in seconds
+		MotionSpeed = 40,     -- hard cap on the speed of a spin / lift (studs/s)
+		MotionCooldown = 2,   -- seconds you cannot be spun / lifted again after one ends
+		SpinRadiusMax = 20,   -- widest orbit of a spin
+		LiftHeight = 22,      -- highest a spin / lift can raise you above where it started
+		SlowMax = 4,          -- longest slow in seconds
+		ScreenMax = 3,        -- longest blind / shake in seconds
 		PushCooldown = 0.4,   -- seconds between pushes on you
 		PushScale = 1,        -- multiplier for pushes that hit you (hub slider)
 		AcceptPush = true,    -- false = nobody can push you
@@ -195,6 +213,11 @@ local Fx = {
 	abilities = {},
 	pending = {},
 	muted = {},
+	burning = {},
+	cleanups = {},
+	freezeLock = 0,
+	motionLock = 0,
+	temps = {},
 	outbox = {},
 	sentKeys = {},
 	seen = {},
@@ -466,6 +489,530 @@ local function receivePush(from, d)
 	Fx.softPush(root, dir, (tonumber(d.s) or 0) * (Fx.config.PushScale or 1))
 end
 
+
+--// ---------- status effects: freeze / burn / pull ----------
+--// visuals show on every client that gets the event. the hold / pull itself only happens on the TARGET's own client,
+--// only when Receive effects is on, always time limited, and never touches Humanoid.Health.
+
+local function visFolder()
+	if not Fx.visFolder or not Fx.visFolder.Parent then
+		local f = Instance.new("Folder")
+		f.Name = "SpellsFxVisuals"
+		f.Parent = workspace
+		Fx.visFolder = f
+	end
+	return Fx.visFolder
+end
+
+local function visualFreeze(char, dur)
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return
+	end
+	local okB, bcf, bsz = pcall(char.GetBoundingBox, char)
+	if not okB then
+		return
+	end
+	local offset = bcf.Position - root.Position
+	local made = {}
+	local function mk(size, transp, mat, color)
+		local p = Instance.new("Part")
+		p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.CastShadow = true, false, false, false, false
+		p.Size = size
+		p.Transparency = transp
+		p.Material = mat
+		p.Color = color
+		p.CFrame = CFrame.new(bcf.Position)
+		p.Parent = visFolder()
+		table.insert(made, p)
+	end
+	mk(bsz + Vector3.new(1.4, 1.4, 1.4), 0.35, Enum.Material.Glass, Color3.fromRGB(150, 215, 255))
+	mk(bsz + Vector3.new(2.4, 2.4, 2.4), 0.88, Enum.Material.Neon, Color3.fromRGB(190, 240, 255))
+	local conn
+	local function stop()
+		Fx.cleanups[stop] = nil
+		if conn then
+			conn:Disconnect()
+			conn = nil
+		end
+		for _, p in ipairs(made) do
+			pcall(function() p:Destroy() end)
+		end
+	end
+	Fx.cleanups[stop] = true
+	conn = RunService.Heartbeat:Connect(function()
+		if not root.Parent then
+			stop()
+			return
+		end
+		local cf = CFrame.new(root.Position + offset)
+		for _, p in ipairs(made) do
+			p.CFrame = cf
+		end
+	end)
+	task.delay(dur + 0.2, stop)
+end
+
+local FIRE_PARTS = { "HumanoidRootPart", "Head", "UpperTorso", "Torso", "LeftUpperArm", "RightUpperArm", "LeftUpperLeg", "RightUpperLeg" }
+
+local function visualBurn(char, dur)
+	local untilT = os.clock() + dur
+	local b = Fx.burning[char]
+	if b then
+		b.untilT = math.max(b.untilT, untilT)
+		return
+	end
+	b = { untilT = untilT, fx = {} }
+	Fx.burning[char] = b
+	for _, n in ipairs(FIRE_PARTS) do
+		local p = char:FindFirstChild(n)
+		if p and p:IsA("BasePart") then
+			local f = Instance.new("Fire")
+			f.Size, f.Heat = 6, 10
+			f.Color, f.SecondaryColor = Color3.fromRGB(255, 120, 0), Color3.fromRGB(255, 40, 0)
+			f.Parent = p
+			local sm = Instance.new("Smoke")
+			sm.Size, sm.Opacity, sm.RiseVelocity = 3, 0.3, 6
+			sm.Color = Color3.fromRGB(40, 40, 40)
+			sm.Parent = p
+			table.insert(b.fx, f)
+			table.insert(b.fx, sm)
+		end
+	end
+	local function stop()
+		Fx.cleanups[stop] = nil
+		for _, f in ipairs(b.fx) do
+			pcall(function() f:Destroy() end)
+		end
+		if Fx.burning[char] == b then
+			Fx.burning[char] = nil
+		end
+	end
+	Fx.cleanups[stop] = true
+	task.spawn(function()
+		while Fx.alive and char.Parent and os.clock() < b.untilT do
+			task.wait(0.2)
+		end
+		stop()
+	end)
+end
+
+local function mechFreeze(char, dur)
+	if not Fx.config.AcceptPush or Fx.freezeRelease or os.clock() < Fx.freezeLock then
+		return
+	end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not root or not hum or hum.Health <= 0 then
+		return
+	end
+	local cf = root.CFrame
+	local saved = { ws = Fx.slowOrig or hum.WalkSpeed, jp = hum.JumpPower, jh = hum.JumpHeight, ar = hum.AutoRotate }
+	local t0 = os.clock()
+	local conn
+	local function release()
+		if not conn then
+			return
+		end
+		conn:Disconnect()
+		conn = nil
+		Fx.freezeRelease = nil
+		Fx.freezeLock = os.clock() + Fx.config.FreezeCooldown
+		pcall(function()
+			hum.WalkSpeed = saved.ws
+			hum.JumpPower = saved.jp
+			hum.JumpHeight = saved.jh
+			hum.AutoRotate = saved.ar
+		end)
+	end
+	Fx.freezeRelease = release
+	pcall(function()
+		hum.WalkSpeed = 0
+		hum.JumpPower = 0
+		hum.JumpHeight = 0
+		hum.AutoRotate = false
+	end)
+	conn = RunService.Heartbeat:Connect(function()
+		if not Fx.alive or not Fx.config.AcceptPush or not root.Parent or hum.Health <= 0 or os.clock() - t0 >= dur then
+			release()
+			return
+		end
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		root.CFrame = cf
+	end)
+end
+
+local function mechPull(dur, pos, speed)
+	if not Fx.config.AcceptPush or not pos then
+		return
+	end
+	local now = os.clock()
+	local st = Fx.pullState
+	if st then
+		st.untilT = math.max(st.untilT, now + dur)
+		st.pos, st.speed = pos, speed
+		return
+	end
+	st = { untilT = now + dur, pos = pos, speed = speed }
+	Fx.pullState = st
+	local lastState = 0
+	local conn
+	conn = RunService.Heartbeat:Connect(function(dt)
+		local c = Players.LocalPlayer.Character
+		local root = c and c:FindFirstChild("HumanoidRootPart")
+		local hum = c and c:FindFirstChildOfClass("Humanoid")
+		if not Fx.alive or not Fx.config.AcceptPush or not root or not hum or hum.Health <= 0 or os.clock() > st.untilT then
+			conn:Disconnect()
+			Fx.pullState = nil
+			return
+		end
+		if Fx.freezeRelease or Fx.motion then
+			return
+		end
+		local off = st.pos - root.Position
+		local flat = Vector3.new(off.X, 0, off.Z)
+		if flat.Magnitude < 4 then
+			return
+		end
+		local v = root.AssemblyLinearVelocity
+		local cap = math.clamp((st.speed or 16) * (Fx.config.PushScale or 1), 0, Fx.config.PullSpeed)
+		local h = Vector3.new(v.X, 0, v.Z) + flat.Unit * cap * 5 * dt
+		if h.Magnitude > cap then
+			h = h.Unit * cap
+		end
+		root.AssemblyLinearVelocity = Vector3.new(h.X, v.Y, h.Z)
+		if os.clock() - lastState > 0.3 then
+			lastState = os.clock()
+			pcall(function() hum:ChangeState(Enum.HumanoidStateType.Freefall) end)
+		end
+	end)
+	Fx.pullConn = conn
+end
+
+local function visualTemp(char, key, dur, build)
+	local per = Fx.temps[char]
+	if not per then
+		per = {}
+		Fx.temps[char] = per
+	end
+	local e = per[key]
+	local untilT = os.clock() + dur
+	if e then
+		e.untilT = math.max(e.untilT, untilT)
+		return
+	end
+	e = { untilT = untilT, inst = {} }
+	per[key] = e
+	local ok, list = pcall(build)
+	if ok and type(list) == "table" then
+		e.inst = list
+	end
+	local function stop()
+		Fx.cleanups[stop] = nil
+		for _, i in ipairs(e.inst) do
+			pcall(function() i:Destroy() end)
+		end
+		if per[key] == e then
+			per[key] = nil
+		end
+	end
+	Fx.cleanups[stop] = true
+	task.spawn(function()
+		while Fx.alive and char.Parent and os.clock() < e.untilT do
+			task.wait(0.2)
+		end
+		stop()
+	end)
+end
+
+local function visualGlow(char, dur, c)
+	local col = Color3.fromRGB(255, 255, 255)
+	if type(c) == "table" then
+		col = Color3.fromRGB(math.clamp(tonumber(c.r) or 255, 0, 255), math.clamp(tonumber(c.g) or 255, 0, 255), math.clamp(tonumber(c.b) or 255, 0, 255))
+	end
+	visualTemp(char, "glow", dur, function()
+		local h = Instance.new("Highlight")
+		h.FillColor, h.OutlineColor = col, col
+		h.FillTransparency, h.OutlineTransparency = 0.55, 0.1
+		h.DepthMode = Enum.HighlightDepthMode.Occluded
+		h.Parent = char
+		return { h }
+	end)
+end
+
+local function visualShock(char, dur)
+	visualTemp(char, "shock", dur, function()
+		local list = {}
+		local col = Color3.fromRGB(120, 200, 255)
+		for _, n in ipairs({ "HumanoidRootPart", "Head", "UpperTorso", "Torso" }) do
+			local p = char:FindFirstChild(n)
+			if p and p:IsA("BasePart") then
+				local pe = Instance.new("ParticleEmitter")
+				pe.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+				pe.Color = ColorSequence.new(col)
+				pe.LightEmission = 1
+				pe.Size = NumberSequence.new(0.5, 0)
+				pe.Lifetime = NumberRange.new(0.15, 0.35)
+				pe.Rate = 60
+				pe.Speed = NumberRange.new(6, 14)
+				pe.SpreadAngle = Vector2.new(180, 180)
+				pe.Parent = p
+				table.insert(list, pe)
+			end
+		end
+		local h = Instance.new("Highlight")
+		h.FillColor, h.OutlineColor = col, Color3.fromRGB(255, 255, 255)
+		h.FillTransparency, h.OutlineTransparency = 0.7, 0
+		h.Parent = char
+		table.insert(list, h)
+		task.spawn(function()
+			while h.Parent do
+				h.FillTransparency = 0.4 + math.random() * 0.5
+				task.wait(0.06)
+			end
+		end)
+		return list
+	end)
+end
+
+local function mechScreen(kind, dur)
+	if not Fx.config.AcceptPush or Fx.screenBusy then
+		return
+	end
+	dur = math.clamp(dur, 0.1, Fx.config.ScreenMax)
+	Fx.screenBusy = true
+	local list = {}
+	local conn
+	local function stop()
+		if not Fx.screenBusy then
+			return
+		end
+		Fx.screenBusy = false
+		Fx.cleanups[stop] = nil
+		if conn then
+			conn:Disconnect()
+			conn = nil
+		end
+		for _, i in ipairs(list) do
+			pcall(function() i:Destroy() end)
+		end
+		pcall(function()
+			local hum = Players.LocalPlayer.Character and Players.LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+			if hum then
+				hum.CameraOffset = Vector3.zero
+			end
+		end)
+	end
+	Fx.cleanups[stop] = true
+	local t0 = os.clock()
+	if kind == "blind" then
+		local cc = Instance.new("ColorCorrectionEffect")
+		cc.Brightness, cc.Contrast, cc.Saturation = 0, 0, 0
+		cc.Parent = Lighting
+		local bl = Instance.new("BlurEffect")
+		bl.Size = 0
+		bl.Parent = Lighting
+		list = { cc, bl }
+		conn = RunService.RenderStepped:Connect(function()
+			local a = os.clock() - t0
+			local k = math.clamp(math.min(a / 0.25, (dur - a) / 0.6), 0, 1)
+			cc.Brightness = 0.9 * k
+			bl.Size = 18 * k
+			if a >= dur then
+				stop()
+			end
+		end)
+	else
+		conn = RunService.RenderStepped:Connect(function()
+			local a = os.clock() - t0
+			local c = Players.LocalPlayer.Character
+			local hum = c and c:FindFirstChildOfClass("Humanoid")
+			if not hum or a >= dur then
+				stop()
+				return
+			end
+			local k = math.clamp((dur - a) / 0.5, 0, 1) * 0.35
+			hum.CameraOffset = Vector3.new((math.random() - 0.5) * k, (math.random() - 0.5) * k, 0)
+		end)
+	end
+	task.delay(dur + 0.3, stop)
+end
+
+local function mechSlow(dur, factor)
+	if not Fx.config.AcceptPush or Fx.slowRelease then
+		return
+	end
+	local c = Players.LocalPlayer.Character
+	local hum = c and c:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then
+		return
+	end
+	dur = math.clamp(dur, 0.1, Fx.config.SlowMax)
+	factor = math.clamp(tonumber(factor) or 0.4, 0.2, 0.9)
+	local orig = hum.WalkSpeed
+	local slowed = orig * factor
+	Fx.slowOrig = orig
+	local t0 = os.clock()
+	local conn
+	local function release()
+		if not conn then
+			return
+		end
+		conn:Disconnect()
+		conn = nil
+		Fx.slowRelease = nil
+		Fx.slowOrig = nil
+		if not Fx.freezeRelease then
+			pcall(function() hum.WalkSpeed = orig end)
+		end
+	end
+	Fx.slowRelease = release
+	conn = RunService.Heartbeat:Connect(function()
+		if not Fx.alive or not Fx.config.AcceptPush or hum.Parent == nil or hum.Health <= 0 or os.clock() - t0 >= dur then
+			release()
+			return
+		end
+		if not Fx.freezeRelease then
+			hum.WalkSpeed = slowed
+		end
+	end)
+end
+
+-- spin = orbit a point (tornado) while rising a bit | lift = float upward and hover. both timed, capped, with a cooldown
+local function mechMotion(kind, dur, pos, p)
+	if not Fx.config.AcceptPush or not pos then
+		return
+	end
+	local now = os.clock()
+	local m = Fx.motion
+	if m then
+		if m.kind == kind then
+			m.untilT = math.min(m.t0 + Fx.config.MotionMax, math.max(m.untilT, now + dur))
+			m.pos = pos
+		end
+		return
+	end
+	if Fx.freezeRelease or now < Fx.motionLock then
+		return
+	end
+	local c = Players.LocalPlayer.Character
+	local root = c and c:FindFirstChild("HumanoidRootPart")
+	local hum = c and c:FindFirstChildOfClass("Humanoid")
+	if not root or not hum or hum.Health <= 0 then
+		return
+	end
+	local start = root.Position
+	local off = Vector3.new(start.X - pos.X, 0, start.Z - pos.Z)
+	m = {
+		kind = kind,
+		t0 = now,
+		untilT = now + math.min(dur, Fx.config.MotionMax),
+		pos = pos,
+		ang = off.Magnitude > 0.1 and math.atan2(off.Z, off.X) or 0,
+		h = 0,
+		rNow = math.min(off.Magnitude, Fx.config.SpinRadiusMax),
+		rGoal = math.clamp(tonumber(p.r) or 10, 3, Fx.config.SpinRadiusMax),
+		w = math.clamp(tonumber(p.w) or 3, 0.5, 5),
+		up = math.clamp(tonumber(p.up) or (kind == "lift" and 8 or 3), 0, 10),
+	}
+	m.w = math.min(m.w, Fx.config.MotionSpeed * 0.8 / m.rGoal)
+	Fx.motion = m
+	local lastState = 0
+	local conn
+	local function finish()
+		if not conn then
+			return
+		end
+		conn:Disconnect()
+		conn = nil
+		Fx.motion = nil
+		Fx.motionLock = os.clock() + Fx.config.MotionCooldown
+		if kind == "spin" and root.Parent then
+			local tangent = Vector3.new(-math.sin(m.ang), 0, math.cos(m.ang)) * m.w * m.rNow
+			if tangent.Magnitude > 14 then
+				tangent = tangent.Unit * 14
+			end
+			root.AssemblyLinearVelocity = Vector3.new(tangent.X, 4, tangent.Z)
+		end
+	end
+	Fx.motionRelease = finish
+	conn = RunService.Heartbeat:Connect(function(dt)
+		if not Fx.alive or not Fx.config.AcceptPush or not root.Parent or hum.Health <= 0 or os.clock() > m.untilT then
+			finish()
+			return
+		end
+		m.h = math.min(m.h + m.up * dt, Fx.config.LiftHeight)
+		local v
+		if kind == "spin" then
+			m.rNow += (m.rGoal - m.rNow) * math.min(1, dt * 3)
+			m.ang += m.w * dt
+			local tgt = Vector3.new(m.pos.X + math.cos(m.ang) * m.rNow, start.Y + m.h, m.pos.Z + math.sin(m.ang) * m.rNow)
+			v = (tgt - root.Position) * 8
+		else
+			local cur = root.AssemblyLinearVelocity
+			v = Vector3.new(cur.X * 0.9, (start.Y + m.h - root.Position.Y) * 6, cur.Z * 0.9)
+		end
+		if v.Magnitude > Fx.config.MotionSpeed then
+			v = v.Unit * Fx.config.MotionSpeed
+		end
+		root.AssemblyLinearVelocity = v
+		if os.clock() - lastState > 0.3 then
+			lastState = os.clock()
+			pcall(function() hum:ChangeState(Enum.HumanoidStateType.Freefall) end)
+		end
+	end)
+end
+
+function Fx.applyStatus(uid, d, from)
+	if type(uid) ~= "number" or type(d) ~= "table" or type(d.n) ~= "string" then
+		return
+	end
+	local plr = Players:GetPlayerByUserId(uid)
+	local char = plr and plr.Character
+	if not char then
+		return
+	end
+	local mine = uid == myId()
+	local dur = tonumber(d.t) or 1
+	if d.n == "freeze" then
+		dur = math.clamp(dur, 0.1, Fx.config.FreezeMax)
+		if d.nv ~= 1 then
+			visualFreeze(char, dur)
+		end
+		if mine then
+			mechFreeze(char, dur)
+		end
+	elseif d.n == "burn" then
+		dur = math.clamp(dur, 0.1, Fx.config.BurnMax)
+		if d.nv ~= 1 then
+			visualBurn(char, dur)
+		end
+	elseif d.n == "pull" then
+		dur = math.clamp(dur, 0.1, 3)
+		if mine then
+			mechPull(dur, Fx.unvec(d.pos), tonumber(d.s))
+		end
+	elseif d.n == "spin" or d.n == "lift" then
+		if mine then
+			local pos = Fx.unvec(d.pos) or (char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position)
+			mechMotion(d.n, dur, pos, { r = d.r, w = d.s, up = d.up })
+		end
+	elseif d.n == "slow" then
+		if mine then
+			mechSlow(dur, d.f)
+		end
+	elseif d.n == "glow" then
+		visualGlow(char, math.clamp(dur, 0.1, 6), d.c)
+	elseif d.n == "shock" then
+		visualShock(char, math.clamp(dur, 0.1, 6))
+	elseif d.n == "blind" or d.n == "shake" then
+		if mine then
+			mechScreen(d.n, dur)
+		end
+	end
+end
+
 --// ---------- sending ----------
 
 local function nextKey()
@@ -502,6 +1049,68 @@ function Fx.push(targetUserId, dir, strength, id)
 	end
 	strength = math.clamp(tonumber(strength) or 0, 0, Fx.config.PushMax)
 	Fx.emit(id or "push", "push", { dir = Fx.vec(dir), s = strength }, targetUserId)
+end
+
+-- status on a player. name = freeze burn pull spin lift slow glow shock blind shake. data: { nv = 1 } hides the built-in visuals, pull needs { pos = Fx.vec(p), s = speed }
+function Fx.status(targetUserId, name, dur, data, id)
+	if type(targetUserId) ~= "number" or type(name) ~= "string" or targetUserId == myId() then
+		return
+	end
+	local d = clean(data or {}, 0) or {}
+	d.n = string.sub(name, 1, 12)
+	d.t = math.clamp(tonumber(dur) or 1, 0.1, 6)
+	Fx.applyStatus(targetUserId, d, myId())
+	Fx.emit(id or "status", "status", d, targetUserId)
+end
+
+-- one call for a whole cast: tells everyone, then applies the effects to every other player inside opts.radius
+-- opts: radius, target (Player), freeze, burn, slow, glow, shock, blind, shake (seconds), pull / lift / spin (speed), pullTime, spinRadius, spinUp, spinTime, liftTime, slowFactor, glowColor, push (speed), novis (bool), data (table)
+function Fx.cast(id, pos, opts)
+	opts = opts or {}
+	local data = { pos = Fx.vec(pos) }
+	for k, v in pairs(opts.data or {}) do
+		data[k] = v
+	end
+	Fx.emit(id, "cast", data, opts.target and opts.target.UserId or nil)
+	for _, plr in ipairs(Fx.playersInRadius(pos, opts.radius or 20, false)) do
+		local r = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+		if r then
+			local nv = opts.novis and { nv = 1 } or nil
+			if opts.freeze then
+				Fx.status(plr.UserId, "freeze", opts.freeze, nv, id)
+			end
+			if opts.burn then
+				Fx.status(plr.UserId, "burn", opts.burn, nv, id)
+			end
+			if opts.pull then
+				Fx.status(plr.UserId, "pull", opts.pullTime or 1, { pos = Fx.vec(pos), s = opts.pull }, id)
+			end
+			if opts.spin then
+				Fx.status(plr.UserId, "spin", opts.spinTime or 3, { pos = Fx.vec(pos), s = opts.spin, r = opts.spinRadius or 10, up = opts.spinUp or 3 }, id)
+			end
+			if opts.lift then
+				Fx.status(plr.UserId, "lift", opts.liftTime or 2, { pos = Fx.vec(pos), up = opts.lift }, id)
+			end
+			if opts.slow then
+				Fx.status(plr.UserId, "slow", opts.slow, { f = opts.slowFactor or 0.4 }, id)
+			end
+			if opts.glow then
+				Fx.status(plr.UserId, "glow", opts.glow, { c = opts.glowColor }, id)
+			end
+			if opts.shock then
+				Fx.status(plr.UserId, "shock", opts.shock, nil, id)
+			end
+			if opts.blind then
+				Fx.status(plr.UserId, "blind", opts.blind, nil, id)
+			end
+			if opts.shake then
+				Fx.status(plr.UserId, "shake", opts.shake, nil, id)
+			end
+			if opts.push then
+				Fx.push(plr.UserId, r.Position - pos, opts.push, id)
+			end
+		end
+	end
 end
 
 local function flush()
@@ -565,6 +1174,10 @@ local function dispatch(ev)
 		return
 	end
 	local d = clean(ev.d, 0) or {}
+	if k == "status" then
+		Fx.applyStatus(ev.tu, d, u)
+		return
+	end
 	if k == "push" then
 		if ev.tu == me then
 			receivePush(u, d)
@@ -635,6 +1248,9 @@ end
 --// ---------- abilities ----------
 
 function Fx.register(id, handlers, path)
+	if type(handlers) == "function" then
+		handlers = { play = handlers }
+	end
 	handlers = handlers or {}
 	local old = Fx.abilities[id]
 	if old and old.stop then
@@ -727,6 +1343,25 @@ function Fx.stop()
 	end
 	for id in pairs(table.clone(Fx.abilities)) do
 		Fx.unregister(id)
+	end
+	if Fx.freezeRelease then
+		pcall(Fx.freezeRelease)
+	end
+	if Fx.motionRelease then
+		pcall(Fx.motionRelease)
+	end
+	if Fx.slowRelease then
+		pcall(Fx.slowRelease)
+	end
+	if Fx.pullConn then
+		pcall(function() Fx.pullConn:Disconnect() end)
+		Fx.pullState = nil
+	end
+	for stopVis in pairs(table.clone(Fx.cleanups)) do
+		pcall(stopVis)
+	end
+	if Fx.visFolder then
+		pcall(function() Fx.visFolder:Destroy() end)
 	end
 	if Fx.ready() then
 		pcall(prune, true)
@@ -3416,7 +4051,7 @@ local function createSettings()
 		saveSettings()
 		Debug.setVisible(v)
 	end)
-	makeToggle(row("Receive pushes", "other players' powers can softly push you, no damage"), State.settings.Impact, function(v)
+	makeToggle(row("Receive effects", "other players' powers can freeze, pull, burn or push you (timed, no damage)"), State.settings.Impact, function(v)
 		State.settings.Impact = v
 		saveSettings()
 		FxGlue.apply()

@@ -8,7 +8,7 @@ local RunService = game:GetService("RunService")
 local Debris = game:GetService("Debris")
 local TweenService = game:GetService("TweenService")
 local lp = Players.LocalPlayer
-local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
+local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, status = function() end, cast = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
 local VIEWER = Fx.viewerOnly == true
 local FX_PATH = Fx.currentPath
 local cam = workspace.CurrentCamera
@@ -269,19 +269,22 @@ local function hitNPC(model, power)
 	if not hum then return end
 	local plr = Players:GetPlayerFromCharacter(model)
 	if plr == lp then return end
-	local b = ignite(model)
-	b.last = os.clock()
 	if plr then
+		-- players: a real burn effect (everyone sees the fire, no damage) plus a soft push, refreshed about once a second
 		local now = os.clock()
-		if now - (pushedAt[plr] or 0) >= 1 then
+		if now - (pushedAt[plr] or 0) >= 0.8 then
 			pushedAt[plr] = now
+			Fx.status(plr.UserId, "burn", 2.5, nil, "lasereyes")
 			local root = model:FindFirstChild("HumanoidRootPart")
 			local from = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
 			if root and from then
 				Fx.push(plr.UserId, root.Position - from.Position, 12, "lasereyes")
 			end
 		end
+		return
 	end
+	local b = ignite(model)
+	b.last = os.clock()
 end
 
 local function scanAt(pos, radius, op, seen, power)

@@ -15,7 +15,7 @@ local Lighting = game:GetService("Lighting")
 local StarterGui = game:GetService("StarterGui")
 local InsertService = game:GetService("InsertService")
 local lp = Players.LocalPlayer
-local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
+local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, status = function() end, cast = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
 local VIEWER = Fx.viewerOnly == true
 local FX_PATH = Fx.currentPath
 local env = (getgenv and getgenv()) or _G
@@ -1133,9 +1133,11 @@ local function hitLoose(pos, rad, dur)
 	end
 end
 
--- players near the hit get an ice block around them (visual only) and a soft push. nothing is held, nothing is damaged
+-- players near the hit: a real freeze on their own client (a few seconds, then a soft push), ice block shown to everyone.
+-- nothing is damaged. the freeze is capped and expires by itself
 local function hitPlayers(pos, rad, push, skipId)
-	for _, plr in ipairs(Fx.playersInRadius(pos, rad or CFG.radius, not push)) do
+	local fdur = 2.5
+	for _, plr in ipairs(Fx.playersInRadius(pos, rad or 14, not push)) do
 		local char = plr.Character
 		local pr = char and char:FindFirstChild("HumanoidRootPart")
 		if pr and plr.UserId ~= skipId then
@@ -1144,18 +1146,20 @@ local function hitPlayers(pos, rad, push, skipId)
 				away = Vector3.new(rng:NextNumber(-1, 1), 0, rng:NextNumber(-1, 1))
 			end
 			if push then
-				Fx.push(plr.UserId, away, 14, "iceshock")
+				Fx.status(plr.UserId, "freeze", fdur, { nv = 1 }, "iceshock")
+				task.delay(fdur + 0.9, function()
+					if pr.Parent then
+						Fx.push(plr.UserId, away, 8, "iceshock")
+					end
+				end)
 			end
-			task.delay(rng:NextNumber(0.5, 0.9), function()
+			task.delay(rng:NextNumber(0.8, 1), function()
 				if not alive or not char.Parent or not pr.Parent then return end
 				local okB, bcf, bsz = pcall(char.GetBoundingBox, char)
 				if not okB then return end
 				local shatter = iceCage(bcf, bsz, true)
-				task.delay(2, function()
+				task.delay(fdur, function()
 					pcall(shatter, true)
-					if push and pr.Parent then
-						Fx.push(plr.UserId, away, 8, "iceshock")
-					end
 				end)
 			end)
 		end

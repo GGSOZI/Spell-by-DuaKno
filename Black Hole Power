@@ -4,7 +4,7 @@ local Debris = game:GetService("Debris")
 local SoundService = game:GetService("SoundService")
 local Lighting = game:GetService("Lighting")
 local lp = Players.LocalPlayer
-local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
+local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, status = function() end, cast = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
 local VIEWER = Fx.viewerOnly == true
 local FX_PATH = Fx.currentPath
 local U = {}
@@ -759,7 +759,7 @@ local function spawnBlackHole(targetPos, onFinished, remote)
 				local pr = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
 				if pr and sent < 6 then
 					sent += 1
-					Fx.push(plr.UserId, hp - pr.Position, 6 + 4 * a, "blackhole")
+					Fx.status(plr.UserId, "pull", 0.9, { pos = Fx.vec(hp), s = 14 + 10 * a }, "blackhole")
 				end
 			end
 		end
