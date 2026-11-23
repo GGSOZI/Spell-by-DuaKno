@@ -1,6 +1,6 @@
 -- Laser Eyes (client) | emitters rebuilt from Dua's VFX logger, made longer + bigger
 -- Equip the "Laser Eyes" tool and hold click/tap (or E): eyes charge, then fire a red laser at your mouse / screen centre.
--- NPCs hit by the laser catch fire, lose health, then die (network-ownership trick, needs sethiddenproperty).
+-- NPCs and players hit by the laser catch fire (visual only). Players get a soft push. Nothing is damaged or killed.
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -8,6 +8,9 @@ local RunService = game:GetService("RunService")
 local Debris = game:GetService("Debris")
 local TweenService = game:GetService("TweenService")
 local lp = Players.LocalPlayer
+local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
+local VIEWER = Fx.viewerOnly == true
+local FX_PATH = Fx.currentPath
 local cam = workspace.CurrentCamera
 
 local CFG = {
@@ -26,9 +29,7 @@ local CFG = {
 	LifeMult = 2.5,      -- particle lifetime multiplier (longer)
 	EyeScale = 0.12,     -- emitter size at the eyes (originals are huge, e.g. ChargeFire = 60)
 	BeamWidth = 3,
-	KillNPCs = true,
 	KillRadius = 8,
-	KillTime = 2.5,      -- seconds of laser contact before an NPC dies (it burns + loses health meanwhile)
 	BurnLinger = 4,      -- fire stays on the NPC this long after you stop hitting it
 	SimRadius = 1000,    -- simulation radius while firing, restored afterwards
 	ShakeCharge = 0.12,  -- camera shake at the end of the charge
@@ -228,29 +229,7 @@ local function startChargeSound(head, dur, ref)
 end
 
 ----------------------------------------------------------------------
--- Simulation radius (boost while firing, then restore)
-----------------------------------------------------------------------
-local origSim, origMax
-local function simBoost()
-	if origSim == nil then
-		local ok, v = pcall(gethiddenproperty, lp, "SimulationRadius")
-		origSim = (ok and tonumber(v)) or 139
-		local ok2, m = pcall(function() return lp.MaximumSimulationRadius end)
-		origMax = (ok2 and m) or 1000
-	end
-	pcall(function() sethiddenproperty(lp, "SimulationRadius", CFG.SimRadius) end)
-	pcall(function() lp.MaximumSimulationRadius = CFG.SimRadius end)
-end
-local function simRestore()
-	if origSim == nil then return end
-	pcall(function() sethiddenproperty(lp, "SimulationRadius", origSim) end)
-	pcall(function() lp.MaximumSimulationRadius = origMax end)
-	origSim, origMax = nil, nil
-end
-
-----------------------------------------------------------------------
--- NPC burn + kill
--- Fire/smoke and the health drain are client-side (only you see them). The final kill is what replicates.
+-- Burn visuals (NPCs and players). Client-side, only you see the fire. Players also get a soft push.
 ----------------------------------------------------------------------
 local burning = {}
 local FIRE_PARTS = { "HumanoidRootPart", "Head", "UpperTorso", "Torso", "LeftUpperArm", "RightUpperArm", "LeftUpperLeg", "RightUpperLeg" }
@@ -258,7 +237,7 @@ local FIRE_PARTS = { "HumanoidRootPart", "Head", "UpperTorso", "Torso", "LeftUpp
 local function ignite(model)
 	local b = burning[model]
 	if b then return b end
-	b = { exposure = 0, last = os.clock(), fx = {}, killed = false }
+	b = { last = os.clock(), fx = {} }
 	for _, n in ipairs(FIRE_PARTS) do
 		local p = model:FindFirstChild(n)
 		if p and p:IsA("BasePart") then
@@ -283,20 +262,25 @@ local function ignite(model)
 	return b
 end
 
+local pushedAt = {}
+
 local function hitNPC(model, power)
-	power = power or 1
 	local hum = model:FindFirstChildOfClass("Humanoid")
-	if not hum or Players:GetPlayerFromCharacter(model) then return end -- NPCs only
+	if not hum then return end
+	local plr = Players:GetPlayerFromCharacter(model)
+	if plr == lp then return end
 	local b = ignite(model)
 	b.last = os.clock()
-	if b.killed then return end
-	b.exposure += 0.1 * power
-	pcall(function() hum.Health = math.max(1, hum.Health - hum.MaxHealth * 0.1 * power / CFG.KillTime) end)
-	if b.exposure >= CFG.KillTime then
-		b.killed = true
-		task.delay(1.5, function() b.killed = false end) -- retry if the kill didn't stick
-		pcall(function() hum:ChangeState(E.HumanoidStateType.Dead) end)
-		pcall(function() hum.Health = 0 end)
+	if plr then
+		local now = os.clock()
+		if now - (pushedAt[plr] or 0) >= 1 then
+			pushedAt[plr] = now
+			local root = model:FindFirstChild("HumanoidRootPart")
+			local from = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+			if root and from then
+				Fx.push(plr.UserId, root.Position - from.Position, 12, "lasereyes")
+			end
+		end
 	end
 end
 
@@ -333,12 +317,15 @@ end
 -- Camera shake
 ----------------------------------------------------------------------
 local shake = 0
-RunService:BindToRenderStep("LaserEyesShake", Enum.RenderPriority.Camera.Value + 1, function()
-	if shake <= 0 then return end
-	local c = workspace.CurrentCamera
-	local r = function() return math.random() - 0.5 end
-	c.CFrame = c.CFrame * CFrame.new(r() * shake, r() * shake, 0) * CFrame.Angles(0, 0, math.rad(r() * shake * 2))
-end)
+if not VIEWER then
+	pcall(function() RunService:UnbindFromRenderStep("LaserEyesShake") end)
+	RunService:BindToRenderStep("LaserEyesShake", Enum.RenderPriority.Camera.Value + 1, function()
+		if shake <= 0 then return end
+		local c = workspace.CurrentCamera
+		local r = function() return math.random() - 0.5 end
+		c.CFrame = c.CFrame * CFrame.new(r() * shake, r() * shake, 0) * CFrame.Angles(0, 0, math.rad(r() * shake * 2))
+	end)
+end
 
 ----------------------------------------------------------------------
 -- Ground/wall effect: big chunks burst on impact, pebbles follow the beam (unanchored, local parts)
@@ -507,6 +494,7 @@ local function fire()
 	local reticle = { mkEmitter("ChargeA", endAtt, 0.5), mkEmitter("Almost", endAtt, 0.6) }
 	local chargeRef = {}
 	startChargeSound(head, CFG.ChargeTime, chargeRef)
+	Fx.emit("lasereyes", "charge", { t = CFG.ChargeTime })
 
 	local dt = 1 / 60
 	local fired = false
@@ -571,10 +559,11 @@ local function fire()
 		table.insert(live, mkSparks(endAtt))
 		local fireSnd = playSound(SOUNDS.Fire, head, true)
 		playSound(SOUNDS.Hit, tgt)
-		if CFG.KillNPCs then simBoost() end
+		Fx.emit("lasereyes", "start", { p = Fx.vec(tgt.Position) })
 
 		firing = true
 		local t1, lastScan, lastPebble, lastChunk, lastP, lastInst = os.clock(), 0, 0, 0, nil, nil
+		local lastAim, lastSent = 0, nil
 		while holding and char.Parent and os.clock() - t1 < CFG.MaxFire do
 			-- power builds up the longer you hold
 			local power = 1 + (CFG.MaxPower - 1) * math.clamp((os.clock() - t1) / CFG.PowerRamp, 0, 1)
@@ -588,7 +577,11 @@ local function fire()
 			end
 			for _, l in ipairs(lights) do l.Brightness = 5 * power end
 			local now = os.clock()
-			if CFG.KillNPCs and now - lastScan >= 0.1 then
+			if now - lastAim >= 0.12 and (not lastSent or (p - lastSent).Magnitude > 1) then
+				lastAim, lastSent = now, p
+				Fx.emit("lasereyes", "aim", { p = Fx.vec(p) })
+			end
+			if now - lastScan >= 0.1 then
 				lastScan = now
 				scanBeam(head.Position, p, char, folder, power)
 			end
@@ -621,8 +614,8 @@ local function fire()
 	end
 
 	-- cleanup (let particles fade out)
+	Fx.emit("lasereyes", "stop", {})
 	shake = 0
-	simRestore()
 	TweenService:Create(cam, TweenInfo.new(0.4), { FieldOfView = baseFov }):Play()
 	for _, l in ipairs(lights) do l:Destroy() end
 	for _, e in ipairs(live) do e.Enabled = false end
@@ -638,6 +631,150 @@ local function fire()
 	end
 	busy = false
 end
+
+----------------------------------------------------------------------
+-- Other players' lasers (visual replay from firebase events, one session per caster)
+----------------------------------------------------------------------
+local sessions = {}
+local remoteConn
+
+local function endSession(s)
+	if s.dead then return end
+	s.dead = true
+	if sessions[s.id] == s then sessions[s.id] = nil end
+	for _, e in ipairs(s.emitters) do pcall(function() e.Enabled = false end) end
+	for _, l in ipairs(s.lights) do pcall(function() l:Destroy() end) end
+	for _, b in ipairs(s.beams) do pcall(function() b.beam:Destroy() end) end
+	if s.snd then pcall(function() s.snd:Destroy() end) end
+	for _, a in ipairs(s.eyes) do Debris:AddItem(a, 4) end
+	Debris:AddItem(s.folder, 4)
+end
+
+local function newSession(pkt)
+	local char = pkt.caster and pkt.caster.Character
+	local head = char and char:FindFirstChild("Head")
+	if not head then return nil end
+	local old = sessions[pkt.casterId]
+	if old then endSession(old) end
+	local s = { id = pkt.casterId, head = head, born = os.clock(), last = os.clock(), phase = "charge", emitters = {}, beams = {}, eyes = {}, lights = {} }
+	s.folder = Instance.new("Folder")
+	s.folder.Name = "LaserEyesRemote"
+	s.folder.Parent = workspace
+	local tgt = Instance.new("Part")
+	tgt.Anchored, tgt.CanCollide, tgt.CanQuery, tgt.CanTouch = true, false, false, false
+	tgt.Transparency = 1
+	tgt.Size = Vector3.new(0.5, 0.5, 0.5)
+	tgt.CFrame = head.CFrame * CFrame.new(0, 0, -20)
+	tgt.Parent = s.folder
+	s.tgt = tgt
+	s.endAtt = Instance.new("Attachment", tgt)
+	for i, x in ipairs({ -0.3, 0.3 }) do
+		local a = Instance.new("Attachment")
+		a.Name = "LaserEyeRemote" .. i
+		a.Position = Vector3.new(x, 0.15, -0.55)
+		a.Parent = head
+		s.eyes[i] = a
+		local l = Instance.new("PointLight")
+		l.Color = Color3.new(1, 0.1, 0.05)
+		l.Range = 14
+		l.Brightness = 1
+		l.Parent = a
+		table.insert(s.lights, l)
+	end
+	sessions[s.id] = s
+	if not remoteConn then
+		remoteConn = RunService.Heartbeat:Connect(function(dt)
+			local now = os.clock()
+			for _, ss in pairs(table.clone(sessions)) do
+				if ss.dead or not ss.head.Parent or not ss.head:IsDescendantOf(workspace) then
+					endSession(ss)
+				elseif now - ss.born > CFG.MaxFire + CFG.ChargeTime + 2 or (ss.phase == "charge" and now - ss.born > CFG.ChargeTime + 1.5) or (ss.phase == "fire" and now - ss.last > 1.5) then
+					endSession(ss)
+				elseif ss.phase == "fire" and ss.goal then
+					ss.cur = ss.cur and ss.cur:Lerp(ss.goal, 1 - math.exp(-CFG.AimSmooth * dt)) or ss.goal
+					ss.tgt.CFrame = CFrame.new(ss.cur)
+					local power = 1 + (CFG.MaxPower - 1) * math.clamp((now - ss.fireAt) / CFG.PowerRamp, 0, 1)
+					for _, fb in ipairs(ss.beams) do
+						fb.beam.Width0, fb.beam.Width1 = fb.w0 * power, fb.w1 * power
+					end
+					for _, l in ipairs(ss.lights) do l.Brightness = 5 * power end
+				end
+			end
+		end)
+	end
+	return s
+end
+
+local function remotePlay(pkt)
+	local k = pkt.kind
+	if k == "charge" then
+		local s = newSession(pkt)
+		if not s then return end
+		for _, a in ipairs(s.eyes) do
+			for _, n in ipairs(EYE_CHARGE) do table.insert(s.emitters, mkEmitter(n, a, CFG.EyeScale)) end
+		end
+	elseif k == "start" then
+		local goal = type(pkt.d) == "table" and Fx.unvec(pkt.d.p)
+		if not goal then return end
+		local s = sessions[pkt.casterId]
+		if not s or s.phase ~= "charge" then
+			s = newSession(pkt)
+		end
+		if not s then return end
+		for _, e in ipairs(s.emitters) do pcall(function() e.Enabled = false end) end
+		s.emitters = {}
+		s.phase, s.fireAt, s.last = "fire", os.clock(), os.clock()
+		s.goal, s.cur = goal, goal
+		s.tgt.CFrame = CFrame.new(goal)
+		for _, a in ipairs(s.eyes) do
+			for _, n in ipairs(EYE_FIRE) do table.insert(s.emitters, mkEmitter(n, a, CFG.EyeScale * 2)) end
+			for _, b in ipairs(BEAMS) do
+				local beam = Instance.new("Beam")
+				beam.Texture = b.tex
+				beam.TextureLength = b.len
+				beam.TextureMode = b.mode
+				beam.TextureSpeed = 1
+				beam.Color = ColorSequence.new(b.col)
+				beam.Transparency = seq(b.trans, 1)
+				beam.LightEmission = 1
+				beam.LightInfluence = 0
+				beam.Width0 = b.w * CFG.BeamWidth * 0.5
+				beam.Width1 = b.w * CFG.BeamWidth
+				beam.Segments = 10
+				beam.FaceCamera = true
+				beam.ZOffset = b.z
+				beam.Attachment0, beam.Attachment1 = a, s.endAtt
+				beam.Parent = s.folder
+				table.insert(s.beams, { beam = beam, w0 = beam.Width0, w1 = beam.Width1 })
+			end
+		end
+		for _, n in ipairs(HIT_FIRE) do table.insert(s.emitters, mkEmitter(n, s.endAtt, HIT_SCALE[n] or 1)) end
+		table.insert(s.emitters, mkSparks(s.endAtt))
+		s.snd = playSound(SOUNDS.Fire, s.head, true)
+	elseif k == "aim" then
+		local s = sessions[pkt.casterId]
+		local goal = s and type(pkt.d) == "table" and Fx.unvec(pkt.d.p)
+		if s and goal and s.phase == "fire" then
+			s.goal, s.last = goal, os.clock()
+		end
+	elseif k == "stop" then
+		local s = sessions[pkt.casterId]
+		if s then endSession(s) end
+	end
+end
+
+local function remoteStop()
+	for _, s in pairs(table.clone(sessions)) do
+		endSession(s)
+	end
+	if remoteConn then
+		remoteConn:Disconnect()
+		remoteConn = nil
+	end
+end
+
+Fx.register("lasereyes", { play = remotePlay, stop = remoteStop }, FX_PATH)
+if VIEWER then return end
 
 ----------------------------------------------------------------------
 -- Tool: equip "Laser Eyes" from your hotbar, then hold click / the on-screen LASER button (or E)

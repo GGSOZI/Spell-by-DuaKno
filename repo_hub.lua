@@ -1,4 +1,5 @@
 --// SPELLS HUB // powers + weapons // by DuaKNo
+--// v3: custom firebase fx layer (SpellsFx) replaces the old ghost replay. powers push softly, nothing kills
 --// v2: ability emblems, per-ability accent, owner editor (rename + set ability) with live npoint sync
 --// client side executor gui. save as "repo_hub.lua" in the repo root, the scan skips it
 --// scans your github repo, sorts every script into POWERS or WEAPONS, preview + activate/equip
@@ -40,8 +41,8 @@ local CONFIG = {
 	OwnerIds = { 8014469067 }, -- DuaKNo's real user id, checked first so it works even offline
 	-- edits are saved to this npoint bin and every player pulls them. make a bin at npoint.io with {} and paste its id
 	Npoint = { BinId = "a58c8d3a0629b499d993", PollSeconds = 15 },
-	-- firebase realtime database that lets players see each other's powers. paste the database url, no trailing slash
-	Firebase = { Url = "https://power-and-tool-default-rtdb.firebaseio.com", Auth = nil, PollSeconds = 0.5, MaxGhosts = 8, MaxPerPlayer = 3, Debug = false },
+	-- custom firebase realtime database (see the setup steps). paste the url, no trailing slash. empty = fx sync off
+	Fx = { Url = "https://power-weapon-default-rtdb.firebaseio.com", Auth = nil, PollSeconds = 0.5 },
 
 	-- folders decide the section first: Repo/Weapons/x.lua -> WEAPONS
 	WeaponFolders = { weapon = true, weapons = true, guns = true, arms = true, arsenal = true },
@@ -147,10 +148,598 @@ local State = {
 	spin = nil,
 	binding = false,
 	toggleKey = Enum.KeyCode.RightShift,
-	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, ImpactPower = 0.5, SelfGuard = true, Quiet = true, Debug = false, NoShare = {}, ToggleKey = "RightShift" },
+	settings = { Scale = 1, Particles = true, Animations = true, Stack = false, Live = true, Impact = true, ImpactPower = 0.5, Quiet = true, Debug = false, NoShare = {}, ToggleKey = "RightShift" },
 }
 
-local Live = { ghosts = {}, starting = {}, my = {}, outbox = {}, sent = {}, seen = {}, hbs = {}, beat = 0, seq = 0, toolOwner = setmetatable({}, { __mode = "k" }) }
+local Fx = (function()
+--// SPELLS FX // custom firebase layer // makes any power or weapon visible to other players
+--// only small numbers / strings travel through firebase. no code, no script source.
+--// every viewer replays the effect with their own copy of the script (viewer mode).
+--// pushes are soft and capped, nothing here touches Humanoid.Health.
+--//
+--// api (everything lives in getgenv().SpellsFx):
+--//   Fx.configure({ Url = "https://xxxx-default-rtdb.firebaseio.com", Auth = nil })
+--//   Fx.register(id, { play = function(pkt) end, stop = function() end }, FX_PATH)   -- FX_PATH = Fx.currentPath captured at the top of the script. pkt = { id, kind, casterId, caster, target, d }
+--//   Fx.emit(id, kind, data, targetUserId)       -- data = plain table of numbers / strings / bools / Fx.vec()
+--//   Fx.push(targetUserId, dir, strength, id)    -- soft push on another player (their own client applies it)
+--//   Fx.softPush(root, dir, strength)            -- soft push on a local part
+--//   Fx.playerAt(mouse) / Fx.playersInRadius(pos, radius)
+--//   Fx.vec(v3) / Fx.unvec(tbl)
+--//   Fx.viewerOnly / Fx.currentPath               -- read both at the very top of your script (before any yield). viewerOnly is true when a script is loaded only to replay for others
+
+local cloneref = cloneref or function(x) return x end
+local Players = cloneref(game:GetService("Players"))
+local HttpService = cloneref(game:GetService("HttpService"))
+
+local genv = (getgenv and getgenv()) or _G
+if genv.SpellsFx and genv.SpellsFx.stop then
+	pcall(genv.SpellsFx.stop)
+end
+
+local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request
+
+local Fx = {
+	config = {
+		Url = "",             -- firebase realtime database url, no trailing slash
+		Auth = nil,           -- optional database secret / token
+		Poll = 0.5,           -- seconds between polls
+		Ttl = 20,             -- seconds an event lives before its sender deletes it
+		MaxPerSec = 14,       -- events accepted per sender per second
+		PushMax = 26,         -- hard cap on the horizontal push speed (studs/s)
+		PushUp = 12,          -- hard cap on the upward push speed
+		PushCooldown = 0.4,   -- seconds between pushes on you
+		PushScale = 1,        -- multiplier for pushes that hit you (hub slider)
+		AcceptPush = true,    -- false = nobody can push you
+		Enabled = true,
+	},
+	abilities = {},
+	pending = {},
+	muted = {},
+	outbox = {},
+	sentKeys = {},
+	seen = {},
+	rate = {},
+	logBuf = {},
+	seq = 0,
+	lastPush = 0,
+	alive = true,
+	started = false,
+	primed = false,
+	listen = false,       -- hub sets this so it hears events for scripts it has not loaded yet
+	viewerOnly = false,
+	currentPath = nil,
+	status = "idle",
+}
+
+local function myId()
+	return Players.LocalPlayer.UserId
+end
+
+function Fx.log(text)
+	table.insert(Fx.logBuf, tostring(text))
+	if #Fx.logBuf > 14 then
+		table.remove(Fx.logBuf, 1)
+	end
+	if Fx.onLog then
+		pcall(Fx.onLog, tostring(text))
+	end
+end
+
+function Fx.configure(cfg)
+	for k, v in pairs(cfg or {}) do
+		Fx.config[k] = v
+	end
+	Fx.start()
+end
+
+function Fx.ready()
+	return Fx.alive
+		and Fx.config.Enabled == true
+		and type(Fx.config.Url) == "string"
+		and Fx.config.Url ~= ""
+		and httpRequest ~= nil
+end
+
+local function room()
+	local id = game.JobId
+	if id == nil or id == "" then
+		id = "place" .. tostring(game.PlaceId)
+	end
+	return (string.gsub(id, "[%.%$#%[%]/]", "_"))
+end
+
+local function buildUrl(path, query)
+	local q = {}
+	if Fx.config.Auth then
+		table.insert(q, "auth=" .. HttpService:UrlEncode(Fx.config.Auth))
+	end
+	for _, part in ipairs(query or {}) do
+		table.insert(q, part)
+	end
+	local base = string.gsub(Fx.config.Url, "/+$", "")
+	local url = base .. "/spellsfx/" .. room() .. path .. ".json"
+	if #q > 0 then
+		url = url .. "?" .. table.concat(q, "&")
+	end
+	return url
+end
+
+local function req(method, path, body, rawBody)
+	if not httpRequest then
+		Fx.status = "executor has no http request"
+		return false
+	end
+	local query = nil
+	if method ~= "GET" then
+		query = { "print=silent" }
+	end
+	local opts = { Url = buildUrl(path, query), Method = method, Headers = { ["Content-Type"] = "application/json" } }
+	if rawBody then
+		opts.Body = rawBody
+	elseif body ~= nil then
+		local okE, enc = pcall(function()
+			return HttpService:JSONEncode(body)
+		end)
+		if not okE then
+			return false
+		end
+		opts.Body = enc
+	end
+	local ok, res = pcall(httpRequest, opts)
+	if not ok or type(res) ~= "table" then
+		Fx.status = "no response (executor blocks the request?)"
+		return false
+	end
+	local code = res.StatusCode
+	if code and code >= 200 and code < 300 then
+		Fx.status = "connected"
+		local data
+		if type(res.Body) == "string" and res.Body ~= "" and res.Body ~= "null" then
+			local okD, dec = pcall(function()
+				return HttpService:JSONDecode(res.Body)
+			end)
+			if okD then
+				data = dec
+			end
+		end
+		return true, data
+	end
+	Fx.status = "firebase error " .. tostring(code) .. " (check url and rules)"
+	return false
+end
+
+--// ---------- data helpers ----------
+
+local function clean(v, depth)
+	local t = type(v)
+	if t == "number" then
+		if v ~= v or v == math.huge or v == -math.huge then
+			return nil
+		end
+		return math.clamp(v, -100000, 100000)
+	elseif t == "string" then
+		return string.sub(v, 1, 40)
+	elseif t == "boolean" then
+		return v
+	elseif t == "table" and depth < 2 then
+		local out, n = {}, 0
+		for k, x in pairs(v) do
+			n += 1
+			if n > 24 then
+				break
+			end
+			local cv = clean(x, depth + 1)
+			if cv ~= nil then
+				out[string.sub(tostring(k), 1, 16)] = cv
+			end
+		end
+		return out
+	end
+	return nil
+end
+
+function Fx.vec(v)
+	return { x = v.X, y = v.Y, z = v.Z }
+end
+
+function Fx.unvec(t)
+	if type(t) ~= "table" then
+		return nil
+	end
+	local x, y, z = t.x, t.y, t.z
+	if type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then
+		return nil
+	end
+	return Vector3.new(x, y, z)
+end
+
+--// ---------- players / targeting ----------
+
+function Fx.playerFromInstance(inst)
+	local model = inst and inst:FindFirstAncestorOfClass("Model")
+	while model do
+		local p = Players:GetPlayerFromCharacter(model)
+		if p then
+			return p
+		end
+		model = model.Parent and model.Parent:FindFirstAncestorOfClass("Model")
+	end
+	return nil
+end
+
+function Fx.playersInRadius(pos, radius, includeSelf)
+	local out = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if includeSelf or p ~= Players.LocalPlayer then
+			local char = p.Character
+			local r = char and char:FindFirstChild("HumanoidRootPart")
+			if r and (r.Position - pos).Magnitude <= radius then
+				table.insert(out, p)
+			end
+		end
+	end
+	return out
+end
+
+-- player under the cursor, or the closest one to where the cursor points
+function Fx.playerAt(mouse, radius)
+	local ok, target = pcall(function()
+		return mouse.Target
+	end)
+	if ok and target then
+		local p = Fx.playerFromInstance(target)
+		if p and p ~= Players.LocalPlayer then
+			return p
+		end
+	end
+	local okH, hit = pcall(function()
+		return mouse.Hit.Position
+	end)
+	if not okH or not hit then
+		return nil
+	end
+	local best, bestD = nil, radius or 10
+	for _, p in ipairs(Fx.playersInRadius(hit, radius or 10, false)) do
+		local r = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+		if r then
+			local d = (r.Position - hit).Magnitude
+			if d < bestD then
+				best, bestD = p, d
+			end
+		end
+	end
+	return best
+end
+
+--// ---------- soft push (never damage, never kill) ----------
+
+function Fx.softPush(root, dir, strength)
+	if not root or not root.Parent or typeof(dir) ~= "Vector3" then
+		return false
+	end
+	local now = os.clock()
+	if now - Fx.lastPush < Fx.config.PushCooldown then
+		return false
+	end
+	strength = math.clamp(tonumber(strength) or 0, 0, Fx.config.PushMax)
+	if strength <= 0 then
+		return false
+	end
+	local flat = Vector3.new(dir.X, 0, dir.Z)
+	if flat.Magnitude < 0.05 then
+		flat = -root.CFrame.LookVector
+	end
+	flat = flat.Unit
+	Fx.lastPush = now
+	local add = flat * strength + Vector3.new(0, math.min(strength * 0.35, Fx.config.PushUp), 0)
+	pcall(function()
+		local v = root.AssemblyLinearVelocity + add
+		local h = Vector3.new(v.X, 0, v.Z)
+		local cap = Fx.config.PushMax * 1.5
+		if h.Magnitude > cap then
+			h = h.Unit * cap
+		end
+		root.AssemblyLinearVelocity = Vector3.new(h.X, math.min(v.Y, Fx.config.PushUp * 2), h.Z)
+		local hum = root.Parent:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum:ChangeState(Enum.HumanoidStateType.Freefall)
+		end
+	end)
+	return true
+end
+
+local function receivePush(from, d)
+	if not Fx.config.AcceptPush then
+		return
+	end
+	local char = Players.LocalPlayer.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return
+	end
+	local dir = Fx.unvec(d.dir)
+	if not dir then
+		local caster = Players:GetPlayerByUserId(from)
+		local cr = caster and caster.Character and caster.Character:FindFirstChild("HumanoidRootPart")
+		dir = cr and (root.Position - cr.Position) or -root.CFrame.LookVector
+	end
+	Fx.softPush(root, dir, (tonumber(d.s) or 0) * (Fx.config.PushScale or 1))
+end
+
+--// ---------- sending ----------
+
+local function nextKey()
+	Fx.seq += 1
+	local ms = math.floor(DateTime.now().UnixTimestampMillis)
+	return string.format("%013d_%d_%05d", ms, myId(), Fx.seq % 100000)
+end
+
+function Fx.emit(id, kind, data, targetUserId)
+	if not Fx.ready() or type(id) ~= "string" or type(kind) ~= "string" then
+		return
+	end
+	local ab = Fx.abilities[id]
+	local path = (ab and ab.path) or Fx.currentPath
+	if path and Fx.muted[path] then
+		return
+	end
+	if #Fx.outbox > 40 then
+		return
+	end
+	local ev = { a = string.sub(id, 1, 40), k = string.sub(kind, 1, 16), u = myId(), d = clean(data or {}, 0) or {} }
+	if type(path) == "string" and #path <= 200 then
+		ev.p = path
+	end
+	if type(targetUserId) == "number" then
+		ev.tu = targetUserId
+	end
+	table.insert(Fx.outbox, { key = nextKey(), ev = ev })
+end
+
+function Fx.push(targetUserId, dir, strength, id)
+	if type(targetUserId) ~= "number" or targetUserId == myId() or typeof(dir) ~= "Vector3" then
+		return
+	end
+	strength = math.clamp(tonumber(strength) or 0, 0, Fx.config.PushMax)
+	Fx.emit(id or "push", "push", { dir = Fx.vec(dir), s = strength }, targetUserId)
+end
+
+local function flush()
+	local sent = 0
+	while #Fx.outbox > 0 and sent < 8 do
+		local item = table.remove(Fx.outbox, 1)
+		sent += 1
+		task.spawn(function()
+			if req("PUT", "/" .. item.key, item.ev) then
+				Fx.sentKeys[item.key] = os.clock()
+			end
+		end)
+	end
+end
+
+local function prune(all)
+	local now = os.clock()
+	local parts = {}
+	for k, t in pairs(Fx.sentKeys) do
+		if all or now - t > Fx.config.Ttl then
+			table.insert(parts, '"' .. k .. '":null')
+			Fx.sentKeys[k] = nil
+		end
+	end
+	if #parts > 0 then
+		req("PATCH", "", nil, "{" .. table.concat(parts, ",") .. "}")
+	end
+end
+
+--// ---------- receiving ----------
+
+local function runPlay(ab, pkt)
+	task.spawn(function()
+		local ok, err = pcall(ab.play, pkt)
+		if not ok then
+			Fx.log("play error " .. tostring(pkt.id) .. ": " .. tostring(err))
+		end
+	end)
+end
+
+local function dispatch(ev)
+	if type(ev) ~= "table" then
+		return
+	end
+	local me = myId()
+	local u, a, k = ev.u, ev.a, ev.k
+	if type(u) ~= "number" or u == me or type(a) ~= "string" or type(k) ~= "string" then
+		return
+	end
+	if #a > 40 or #k > 16 then
+		return
+	end
+	local now = os.clock()
+	local rl = Fx.rate[u]
+	if not rl or now - rl.t >= 1 then
+		rl = { t = now, n = 0 }
+		Fx.rate[u] = rl
+	end
+	rl.n += 1
+	if rl.n > Fx.config.MaxPerSec then
+		return
+	end
+	local d = clean(ev.d, 0) or {}
+	if k == "push" then
+		if ev.tu == me then
+			receivePush(u, d)
+		end
+		return
+	end
+	local pkt = {
+		id = a,
+		kind = k,
+		casterId = u,
+		caster = Players:GetPlayerByUserId(u),
+		target = type(ev.tu) == "number" and ev.tu or nil,
+		d = d,
+	}
+	local ab = Fx.abilities[a]
+	if ab and ab.play then
+		runPlay(ab, pkt)
+	elseif type(ev.p) == "string" and Fx.onUnknown then
+		local list = Fx.pending[a]
+		if not list then
+			list = {}
+			Fx.pending[a] = list
+		end
+		if #list < 20 then
+			table.insert(list, { pkt = pkt, t = now })
+		end
+		if not Fx.asked or now - (Fx.asked[a] or -99) > 15 then
+			Fx.asked = Fx.asked or {}
+			Fx.asked[a] = now
+			task.spawn(function()
+				local ok, err = pcall(Fx.onUnknown, ev.p, a)
+				if not ok then
+					Fx.log("load error: " .. tostring(err))
+				end
+			end)
+		end
+	end
+end
+
+local function poll()
+	local ok, data = req("GET", "")
+	if not ok then
+		return
+	end
+	if type(data) ~= "table" then
+		data = {}
+	end
+	local keys = {}
+	for k in pairs(data) do
+		table.insert(keys, k)
+	end
+	table.sort(keys)
+	local first = not Fx.primed
+	Fx.primed = true
+	local nextSeen = {}
+	for _, k in ipairs(keys) do
+		nextSeen[k] = true
+		if not first and not Fx.seen[k] then
+			local okD, errD = pcall(dispatch, data[k])
+			if not okD then
+				Fx.log("dispatch error: " .. tostring(errD))
+			end
+		end
+	end
+	Fx.seen = nextSeen
+end
+
+--// ---------- abilities ----------
+
+function Fx.register(id, handlers, path)
+	handlers = handlers or {}
+	local old = Fx.abilities[id]
+	if old and old.stop then
+		pcall(old.stop)
+	end
+	local ab = { play = handlers.play, stop = handlers.stop, path = path or Fx.currentPath, viewer = Fx.viewerOnly }
+	Fx.abilities[id] = ab
+	local list = Fx.pending[id]
+	Fx.pending[id] = nil
+	if list and ab.play then
+		local now = os.clock()
+		for _, item in ipairs(list) do
+			if now - item.t < 12 then
+				runPlay(ab, item.pkt)
+			end
+		end
+	end
+	Fx.start()
+	return function()
+		if Fx.abilities[id] == ab then
+			Fx.unregister(id)
+		end
+	end
+end
+
+function Fx.unregister(id)
+	local ab = Fx.abilities[id]
+	if not ab then
+		return
+	end
+	Fx.abilities[id] = nil
+	if ab.stop then
+		pcall(ab.stop)
+	end
+end
+
+function Fx.unregisterPath(path)
+	for id, ab in pairs(Fx.abilities) do
+		if ab.path == path then
+			Fx.unregister(id)
+		end
+	end
+end
+
+function Fx.hasAbility(id)
+	return Fx.abilities[id] ~= nil
+end
+
+function Fx.setMuted(path, v)
+	Fx.muted[path] = v and true or nil
+end
+
+function Fx.isMuted(path)
+	return Fx.muted[path] == true
+end
+
+--// ---------- loops ----------
+
+function Fx.start()
+	if Fx.started or not Fx.alive then
+		return
+	end
+	Fx.started = true
+	task.spawn(function()
+		while Fx.alive do
+			if Fx.ready() and (Fx.listen or next(Fx.abilities) ~= nil) then
+				pcall(poll)
+			end
+			task.wait(math.max(0.25, tonumber(Fx.config.Poll) or 0.5))
+		end
+	end)
+	task.spawn(function()
+		local pruneT = os.clock()
+		while Fx.alive do
+			if Fx.ready() then
+				pcall(flush)
+				if os.clock() - pruneT >= 5 then
+					pruneT = os.clock()
+					pcall(prune, false)
+				end
+			end
+			task.wait(0.1)
+		end
+	end)
+end
+
+function Fx.stop()
+	if not Fx.alive then
+		return
+	end
+	for id in pairs(table.clone(Fx.abilities)) do
+		Fx.unregister(id)
+	end
+	if Fx.ready() then
+		pcall(prune, true)
+	end
+	Fx.alive = false
+	if genv.SpellsFx == Fx then
+		genv.SpellsFx = nil
+	end
+end
+
+genv.SpellsFx = Fx
+return Fx
+end)()
 
 local Debug = { buf = {}, max = 160, t0 = os.clock() }
 
@@ -199,7 +788,7 @@ end
 
 local function cleanup()
 	State.alive = false
-	pcall(Live.shutdown)
+	pcall(Fx.stop)
 	for _, conn in ipairs(State.connections) do
 		pcall(function() conn:Disconnect() end)
 	end
@@ -913,7 +1502,7 @@ end
 
 local function stopRun(run)
 	State.runs[run.entry.path] = nil
-	pcall(Live.onStop, run.entry, run)
+	pcall(Fx.unregisterPath, run.entry.path)
 	finalizeRun(run)
 	for _, th in ipairs(run.threads) do
 		pcall(task.cancel, th)
@@ -1003,7 +1592,8 @@ function Runner.run(entry)
 		finalized = false,
 	}
 	State.runs[entry.path] = run
-	pcall(Live.onRun, entry, run)
+	Fx.currentPath = entry.path
+	Fx.viewerOnly = false
 
 	local th = task.spawn(function()
 		local hp, hw = Debug.hooks(entry.name)
@@ -1028,1335 +1618,112 @@ function Runner.run(entry)
 	fire()
 end
 
---// ============================== live (firebase) ==============================
---// every run is announced to firebase. players running the hub in the same server replay your power on their side
---// only repo paths travel through firebase, the code always comes from the viewer's own repo scan
+--// ============================== fx sync (custom firebase) ==============================
+--// the hub owns the connection. powers and weapons talk to it through getgenv().SpellsFx (see FxNet header)
+--// events carry only numbers and strings. a viewer replays with its own copy of the script from its own repo scan
 
-Live.noted = {}
-Live.lastLoud = {}
-Live.pending = {}
-Live.myMeta = {}
-Live.logBuf = {}
+local FxGlue = { bad = {}, loading = {}, lastStatus = nil }
 
-function Live.log(text, color)
-	Debug.add(text, color)
-	table.insert(Live.logBuf, tostring(math.floor(os.clock())) .. " " .. tostring(text))
-	if #Live.logBuf > 14 then
-		table.remove(Live.logBuf, 1)
+function FxGlue.apply()
+	local c = CONFIG.Fx or {}
+	for path in pairs(State.settings.NoShare) do
+		Fx.setMuted(path, true)
 	end
-	local fb = CONFIG.Firebase
-	if fb and type(fb.Url) == "string" and fb.Url ~= "" and httpRequest then
-		task.spawn(Live.req, "PUT", "!log/" .. Players.LocalPlayer.UserId, Live.logBuf)
-	end
+	Fx.configure({
+		Url = c.Url or "",
+		Auth = c.Auth,
+		Poll = c.PollSeconds or 0.5,
+		Enabled = State.settings.Live == true,
+		AcceptPush = State.settings.Impact == true,
+		PushScale = math.clamp((State.settings.ImpactPower or 0.5) * 2, 0.2, 2),
+	})
 end
 
-function Live.spawn(fn)
-	task.spawn(function()
-		local ok, err = pcall(fn)
-		if not ok then
-			Live.log("error: " .. tostring(err))
-		end
-	end)
-end
-
-function Live.fallbackEntry(w)
-	local path = w.path
-	if type(path) ~= "string" or #path > 200 or string.find(path, "..", 1, true) or string.sub(path, 1, 1) == "/" then
-		return nil
-	end
-	local file = string.match(path, "([^/]+)$")
-	if not file or not Repo.validExt(file) then
-		return nil
-	end
-	local base = string.gsub(file, "%.%w+$", "")
-	return {
-		name = base,
-		file = file,
-		path = path,
-		url = ("https://raw.githubusercontent.com/%s/%s/%s/%s"):format(CONFIG.Owner, CONFIG.Repo, CONFIG.Branch, Repo.encode(path)),
-		kind = w.kind or "Powers",
-		category = w.cat or "General",
-	}
-end
-
-function Live.say(text, color)
-	Live.log(text, color)
-	status(text, color)
-	local now = os.clock()
-	if color == THEME.bad and now - (Live.lastLoud[text] or -99) > 30 then
-		Live.lastLoud[text] = now
-		notify("Spells live", text)
-	elseif CONFIG.Firebase and CONFIG.Firebase.Debug then
-		notify("Spells live", text)
-	end
-end
-
-function Live.wrap(src)
-	return "local __G = ...; local game, Game, Instance, getgenv, cloneref, gethui, print, warn = __G.game, __G.Game, __G.Instance, __G.getgenv, __G.cloneref, __G.gethui, __G.print, __G.warn\n" .. src
-end
-
-function Live.flushPending(g)
-	local keep = {}
-	for _, item in ipairs(Live.pending) do
-		if os.clock() - item.t < 15 then
-			if item.ev.u == g.uid and item.ev.p == g.hash then
-				pcall(Live.ghostTool, g, item.ev)
-			else
-				table.insert(keep, item)
-			end
-		end
-	end
-	Live.pending = keep
-end
-Live.screenFx = { BlurEffect = true, ColorCorrectionEffect = true, BloomEffect = true, SunRaysEffect = true, DepthOfFieldEffect = true }
-Live.mouseEventNames = { "Button1Down", "Button1Up", "Button2Down", "Button2Up", "Move", "WheelForward", "WheelBackward", "KeyDown", "KeyUp", "Idle" }
-
-function Live.ready()
-	local fb = CONFIG.Firebase
-	return State.settings.Live == true and fb ~= nil and type(fb.Url) == "string" and fb.Url ~= "" and httpRequest ~= nil
-end
-
-function Live.room()
-	local id = game.JobId
-	if id == nil or id == "" then
-		id = "place" .. tostring(game.PlaceId)
-	end
-	return (string.gsub(id, "[%.%$#%[%]/]", "_"))
-end
-
-function Live.hash(path)
-	return tostring(hashString(path))
-end
-
-function Live.myId()
-	return Players.LocalPlayer.UserId
-end
-
-function Live.req(method, path, body, query, raw)
-	local fb = CONFIG.Firebase
-	local q = {}
-	if fb.Auth then
-		table.insert(q, "auth=" .. HttpService:UrlEncode(fb.Auth))
-	end
-	for _, part in ipairs(query or {}) do
-		table.insert(q, part)
-	end
-	local base = string.gsub(fb.Url, "/+$", "")
-	local url
-	if string.sub(path, 1, 1) == "!" then
-		url = base .. "/spellshub/_" .. string.sub(path, 2) .. ".json"
-	else
-		url = base .. "/spellshub/" .. Live.room() .. path .. ".json"
-	end
-	if method ~= "GET" then
-		table.insert(q, "print=silent")
-	end
-	if #q > 0 then
-		url = url .. "?" .. table.concat(q, "&")
-	end
-	local opts = { Url = url, Method = method, Headers = { ["Content-Type"] = "application/json" } }
-	if raw then
-		opts.Body = raw
-	elseif body ~= nil then
-		local okE, enc = pcall(function()
-			return HttpService:JSONEncode(body)
-		end)
-		if not okE then
-			return false
-		end
-		opts.Body = enc
-	end
-	local ok, res = pcall(httpRequest, opts)
-	if not ok or type(res) ~= "table" then
-		return false
-	end
-	local code = res.StatusCode
-	if code and code >= 200 and code < 300 then
-		local data
-		if type(res.Body) == "string" and res.Body ~= "" and res.Body ~= "null" then
-			local okd, decoded = pcall(function()
-				return HttpService:JSONDecode(res.Body)
-			end)
-			if okd then
-				data = decoded
-			end
-		end
-		Live.lastCode = nil
-		return true, data
-	end
-	Live.lastCode = code
-	return false
-end
-
---// ---------- sending (your own powers) ----------
-
-function Live.pushActive()
-	if not Live.ready() then return end
-	local r = {}
-	for h, p in pairs(Live.my) do
-		local meta = Live.myMeta[h] or {}
-		r[h] = { p = p, k = meta.k, c = meta.c }
-	end
-	local body = { n = Players.LocalPlayer.DisplayName, b = Live.beat }
-	if next(r) then
-		body.r = r
-	end
-	task.spawn(Live.req, "PUT", "/active/" .. Live.myId(), body)
-end
-
-function Live.send(ev)
-	if not Live.ready() or next(Live.my) == nil then return end
-	if ev.p and not Live.my[ev.p] then return end
-	Live.seq += 1
-	ev.u = Live.myId()
-	local key = string.format("%013d_%d_%d", DateTime.now().UnixTimestampMillis, ev.u, Live.seq)
-	table.insert(Live.outbox, { key = key, ev = ev })
-end
-
-function Live.flush()
-	if #Live.outbox == 0 then return end
-	local batch, keys = {}, {}
-	for _ = 1, math.min(#Live.outbox, 25) do
-		local item = table.remove(Live.outbox, 1)
-		batch[item.key] = item.ev
-		table.insert(keys, item.key)
-	end
-	if Live.req("PATCH", "/events", batch) then
-		local now = os.clock()
-		for _, k in ipairs(keys) do
-			Live.sent[k] = now
-		end
-	end
-end
-
-function Live.prune()
-	local now = os.clock()
-	local parts = {}
-	for k, t in pairs(Live.sent) do
-		if now - t > 30 then
-			table.insert(parts, '"' .. k .. '":null')
-			Live.sent[k] = nil
-		end
-	end
-	if #parts > 0 then
-		Live.req("PATCH", "/events", nil, nil, "{" .. table.concat(parts, ",") .. "}")
-	end
-end
-
-function Live.clearMine()
-	local id = Live.myId()
-	task.spawn(Live.req, "DELETE", "/active/" .. id)
-	task.spawn(Live.req, "DELETE", "/mouse/" .. id)
-end
-
-function Live.sendMouse()
-	if next(Live.my) == nil then return end
-	local ok, pos = pcall(function()
-		return Players.LocalPlayer:GetMouse().Hit.Position
-	end)
-	if not ok or not pos then return end
-	local now = os.clock()
-	if Live.lastMouse and (pos - Live.lastMouse).Magnitude < 1 and now - Live.lastMouseT < 3 then return end
-	Live.lastMouse, Live.lastMouseT = pos, now
-	task.spawn(Live.req, "PUT", "/mouse/" .. Live.myId(), { x = pos.X, y = pos.Y, z = pos.Z })
-end
-
-function Live.onInput(input, processed, d)
-	if next(Live.my) == nil then return end
-	if d == 1 and (processed or UserInputService:GetFocusedTextBox()) then return end
-	local ut = input.UserInputType
-	if ut == Enum.UserInputType.Keyboard then
-		if input.KeyCode == State.toggleKey then return end
-		Live.send({ k = "i", d = d, t = "Keyboard", c = input.KeyCode.Name })
-	elseif ut == Enum.UserInputType.MouseButton1 or ut == Enum.UserInputType.MouseButton2 then
-		Live.send({ k = "i", d = d, t = ut.Name })
-	end
-end
-
-function Live.watchRun(run)
-	run.liveConns = {}
-	local count = 0
-	local hash = Live.hash(run.entry.path)
-	local function register(tool)
-		count += 1
-		local idx = count
-		Live.toolOwner[tool] = true
-		for _, name in ipairs({ "Activated", "Deactivated", "Equipped", "Unequipped" }) do
-			table.insert(run.liveConns, tool[name]:Connect(function()
-				local ok, p = pcall(function()
-					return Players.LocalPlayer:GetMouse().Hit.Position
-				end)
-				p = ok and p or Vector3.zero
-				Live.send({ k = "t", p = hash, i = idx, e = name, x = p.X, y = p.Y, z = p.Z })
-			end))
-		end
-	end
-	task.spawn(function()
-		while State.alive and State.runs[run.entry.path] == run do
-			local lp = Players.LocalPlayer
-			for _, root in ipairs({ lp:FindFirstChildOfClass("Backpack"), lp.Character }) do
-				if root then
-					for _, c in ipairs(root:GetChildren()) do
-						if c:IsA("Tool") and not run.liveBefore[c] and not Live.toolOwner[c] then
-							register(c)
-						end
-					end
-				end
-			end
-			task.wait(0.4)
-		end
-	end)
-end
-
-function Live.onRun(entry, run)
-	if not Live.ready() then return end
-	run.liveBefore = run.before or {}
-	if not State.settings.NoShare[entry.path] then
-		Live.my[Live.hash(entry.path)] = entry.path
-		Live.myMeta[Live.hash(entry.path)] = { k = entry.kind, c = entry.category }
-	end
-	Live.watchRun(run)
-	Live.pushActive()
-end
-
-function Live.isShared(entry)
+function FxGlue.isShared(entry)
 	return not State.settings.NoShare[entry.path]
 end
 
-function Live.setShare(entry, v)
-	local h = Live.hash(entry.path)
+function FxGlue.setShare(entry, v)
 	if v then
 		State.settings.NoShare[entry.path] = nil
 	else
 		State.settings.NoShare[entry.path] = true
 	end
+	Fx.setMuted(entry.path, not v)
 	saveSettings()
 	Debug.add("share " .. entry.name .. ": " .. (v and "on" or "off"))
-	if State.runs[entry.path] and Live.ready() then
-		if v then
-			Live.my[h] = entry.path
-			Live.myMeta[h] = { k = entry.kind, c = entry.category }
-		else
-			Live.my[h] = nil
-		end
-		Live.pushActive()
-		if next(Live.my) == nil then
-			task.spawn(Live.req, "DELETE", "/mouse/" .. Live.myId())
-		end
-	end
 end
 
-function Live.onStop(entry, run)
-	Live.my[Live.hash(entry.path)] = nil
-	for _, c in ipairs(run.liveConns or {}) do
-		pcall(function() c:Disconnect() end)
-	end
-	run.liveConns = nil
-	if next(Live.my) == nil and Live.ready() then
-		task.spawn(Live.req, "DELETE", "/mouse/" .. Live.myId())
-	end
-	Live.pushActive()
-end
-
---// ---------- ghosts (other players' powers replayed here) ----------
-
-function Live.passthrough(real, overrides, blocked)
-	return setmetatable({}, {
-		__index = function(_, k)
-			local o = overrides[k]
-			if o ~= nil then
-				return o
-			end
-			local v = real[k]
-			if type(v) == "function" then
-				return function(_, ...)
-					return v(real, ...)
-				end
-			end
-			return v
-		end,
-		__newindex = function(_, k, v)
-			if blocked and blocked[k] then return end
-			real[k] = v
-		end,
-		__tostring = function()
-			return tostring(real)
-		end,
-	})
-end
-
-function Live.buildGhost(g)
-	local plr = g.affect and Players.LocalPlayer or g.player
-	g.gui = Instance.new("Folder")
-	g.backpack = Instance.new("Folder")
-	g.backpack.Name = "Backpack"
-	g.hit = CFrame.new()
-	g.mouseEvents = {}
-	for _, name in ipairs(Live.mouseEventNames) do
-		g.mouseEvents[name] = Instance.new("BindableEvent")
-	end
-	g.inputBegan = Instance.new("BindableEvent")
-	g.inputEnded = Instance.new("BindableEvent")
-	g.toolCount = 0
-	table.insert(g.conns, g.backpack.ChildAdded:Connect(function(c)
-		if c:IsA("Tool") then
-			g.toolCount += 1
-			g.toolList[g.toolCount] = c
-		end
-	end))
-
-	g.mouse = setmetatable({}, {
-		__index = function(_, k)
-			if g.mouseEvents[k] then
-				return g.mouseEvents[k].Event
-			end
-			if k == "Hit" then
-				return g.hit
-			elseif k == "Origin" or k == "UnitRay" or k == "Target" or k == "X" or k == "Y" then
-				local oc = g.owner.Character
-				local head = oc and (oc:FindFirstChild("Head") or oc:FindFirstChild("HumanoidRootPart"))
-				local from = head and head.Position or Vector3.zero
-				local d = g.hit.Position - from
-				local dir = d.Magnitude > 0.001 and d.Unit or Vector3.zAxis
-				if k == "Origin" then
-					return CFrame.new(from, from + dir)
-				elseif k == "UnitRay" then
-					return Ray.new(from, dir)
-				elseif k == "Target" then
-					if d.Magnitude < 0.001 then
-						return nil
-					end
-					local params = RaycastParams.new()
-					params.FilterType = Enum.RaycastFilterType.Exclude
-					params.FilterDescendantsInstances = { oc }
-					local res = workspace:Raycast(from, d * 1.02, params)
-					return res and res.Instance or nil
-				end
-				local c = workspace.CurrentCamera
-				if c then
-					local v = c:WorldToViewportPoint(g.hit.Position)
-					return k == "X" and v.X or v.Y
-				end
-				return 0
-			end
-			return nil
-		end,
-		__newindex = function() end,
-	})
-
-	local lpProxy = setmetatable({}, {
-		__index = function(_, k)
-			if k == "GetMouse" then
-				return function()
-					return g.mouse
-				end
-			elseif k == "Backpack" then
-				return g.backpack
-			elseif k == "PlayerGui" then
-				return g.gui
-			elseif k == "FindFirstChild" or k == "FindFirstChildOfClass" or k == "FindFirstChildWhichIsA" or k == "WaitForChild" then
-				return function(_, name, ...)
-					if name == "Backpack" then
-						return g.backpack
-					elseif name == "PlayerGui" then
-						return g.gui
-					end
-					return plr[k](plr, name, ...)
-				end
-			end
-			local v = plr[k]
-			if type(v) == "function" then
-				return function(_, ...)
-					return v(plr, ...)
-				end
-			end
-			return v
-		end,
-		__newindex = function(_, k, v)
-			pcall(function() plr[k] = v end)
-		end,
-		__tostring = function()
-			return plr.Name
-		end,
-	})
-
-	g.players = Live.passthrough(Players, { LocalPlayer = lpProxy })
-
-	local function service(name)
-		if name == "Players" then
-			return g.players
-		elseif name == "UserInputService" then
-			return g.uis
-		elseif name == "ContextActionService" then
-			return g.cas
-		end
-		return game:GetService(name)
-	end
-
-	local gameProxy = setmetatable({}, {
-		__index = function(_, k)
-			if k == "GetService" or k == "service" then
-				return function(_, name)
-					return service(name)
-				end
-			elseif k == "Players" or k == "UserInputService" or k == "ContextActionService" then
-				return service(k)
-			end
-			local v = game[k]
-			if type(v) == "function" then
-				return function(_, ...)
-					return v(game, ...)
-				end
-			end
-			return v
-		end,
-		__newindex = function(_, k, v)
-			game[k] = v
-		end,
-		__tostring = function()
-			return "Game"
-		end,
-	})
-
-	local instance = setmetatable({
-		new = function(class, parent)
-			local inst = Instance.new(class)
-			g.created[inst] = true
-			if Live.screenFx[class] and not g.affect then
-				inst.Enabled = false
-			end
-			if parent ~= nil then
-				inst.Parent = parent
-			end
-			return inst
-		end,
-	}, { __index = Instance })
-
-	g.genv = {}
-	local gp, gw = Debug.hooks("ghost " .. tostring(g.entry and g.entry.name or "?"))
-	g.env = {
-		print = gp,
-		warn = gw,
-		game = gameProxy,
-		Game = gameProxy,
-		Instance = instance,
-		getgenv = function()
-			return g.genv
-		end,
-		cloneref = function(x)
-			if type(x) == "table" then
-				return x
-			end
-			return cloneref(x)
-		end,
-		gethui = function()
-			return g.gui
-		end,
-	}
-end
-
-function Live.equip(g, tool)
-	local char = g.player.Character
-	if not char then return end
-	tool.Parent = char
-	for _, p in ipairs(tool:GetDescendants()) do
-		if p:IsA("BasePart") then
-			p.CanCollide = false
-			p.Massless = true
-		end
-	end
-	local handle = tool:FindFirstChild("Handle")
-	local hand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
-	if handle and hand and not g.grips[tool] then
-		local w = Instance.new("Weld")
-		w.Name = "RightGrip"
-		w.Part0 = hand
-		w.Part1 = handle
-		local att = hand:FindFirstChild("RightGripAttachment")
-		w.C0 = att and att.CFrame or CFrame.new(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0)
-		w.C1 = tool.Grip
-		w.Parent = hand
-		g.grips[tool] = w
-		handle.Anchored = false
-		table.insert(g.conns, tool:GetPropertyChangedSignal("Grip"):Connect(function()
-			if w.Parent then
-				w.C1 = tool.Grip
-			end
-		end))
-	end
-end
-
-function Live.unequip(g, tool)
-	local w = g.grips[tool]
-	if w then
-		pcall(function() w:Destroy() end)
-		g.grips[tool] = nil
-	end
-	tool.Parent = g.backpack
-end
-
-function Live.fireSignal(sig, arg)
-	if firesignal then
-		pcall(firesignal, sig, arg)
-	elseif getconnections then
-		local ok, list = pcall(getconnections, sig)
-		if ok then
-			for _, c in ipairs(list) do
-				pcall(function() c:Fire(arg) end)
-			end
-		end
-	end
-end
-
-function Live.ghostTool(g, ev)
-	if ev.x then
-		g.hit = CFrame.new(ev.x, ev.y, ev.z)
-	end
-	local tool = g.toolList[ev.i]
-	if not tool or not tool.Parent then return end
-	if not g.affect then
-		if ev.e == "Equipped" then
-			Live.equip(g, tool)
-		elseif ev.e == "Unequipped" then
-			Live.unequip(g, tool)
-		end
-	end
-	Live.fireSignal(tool[ev.e], ev.e == "Equipped" and g.mouse or nil)
-end
-
-function Live.ghostInput(g, ev)
-	local state = ev.d == 1 and Enum.UserInputState.Begin or Enum.UserInputState.End
-	local kc, ut = Enum.KeyCode.Unknown, Enum.UserInputType[ev.t]
-	if ev.t == "Keyboard" then
-		kc = Enum.KeyCode[ev.c]
-		g.keys[kc] = ev.d == 1 or nil
-	else
-		g.buttons[ut] = ev.d == 1 or nil
-	end
-	local obj = { KeyCode = kc, UserInputType = ut, UserInputState = state, Position = Vector3.zero, Delta = Vector3.zero }
-	;(ev.d == 1 and g.inputBegan or g.inputEnded):Fire(obj, false)
-	if ut == Enum.UserInputType.MouseButton1 then
-		g.mouseEvents[ev.d == 1 and "Button1Down" or "Button1Up"]:Fire()
-	elseif ut == Enum.UserInputType.MouseButton2 then
-		g.mouseEvents[ev.d == 1 and "Button2Down" or "Button2Up"]:Fire()
-	elseif ev.t == "Keyboard" then
-		g.mouseEvents[ev.d == 1 and "KeyDown" or "KeyUp"]:Fire(string.lower(ev.c))
-	end
-	for name, a in pairs(g.actions) do
-		for _, key in ipairs(a.keys) do
-			if key == kc or key == ut then
-				pcall(a.fn, name, state, obj)
-				break
-			end
-		end
-	end
-end
-
-function Live.camGuard()
-	local any = false
-	for _, g in pairs(Live.ghosts) do
-		if not g.affect then
-			any = true
-		end
-	end
-	local want = any and Runner.count() == 0
-	if want and not Live.guard then
-		Live.guard = true
-		pcall(function()
-			RunService:BindToRenderStep("SpellsHubGhostFovA", Enum.RenderPriority.First.Value, function()
-				local c = workspace.CurrentCamera
-				if c then
-					Live.fov = c.FieldOfView
-				end
-			end)
-			RunService:BindToRenderStep("SpellsHubGhostFovB", Enum.RenderPriority.Last.Value, function()
-				local c = workspace.CurrentCamera
-				if c and Live.fov and Runner.count() == 0 then
-					c.FieldOfView = Live.fov
-				end
-			end)
-		end)
-	elseif not want and Live.guard then
-		Live.guard = false
-		pcall(function() RunService:UnbindFromRenderStep("SpellsHubGhostFovA") end)
-		pcall(function() RunService:UnbindFromRenderStep("SpellsHubGhostFovB") end)
-	end
-end
-
-function Live.startGhost(key, w)
-	local plr = Players:GetPlayerByUserId(w.uid)
-	if not plr then
-		if not Live.noted[key] then
-			Live.noted[key] = true
-			Live.say("live: " .. tostring(w.name or w.uid) .. " is in another server")
-		end
-		return
-	end
-	if not loadstring then
-		if not Live.noted[key] then
-			Live.noted[key] = true
-			Live.say("live: this executor has no loadstring", THEME.bad)
-		end
-		return
-	end
-	local total, mine = 0, 0
-	for _, g in pairs(Live.ghosts) do
-		total += 1
-		if g.uid == w.uid then
-			mine += 1
-		end
-	end
-	if total >= (CONFIG.Firebase.MaxGhosts or 8) or mine >= (CONFIG.Firebase.MaxPerPlayer or 3) then return end
+-- another player used a power this client has not loaded: load the viewer copy from our own repo scan
+function FxGlue.load(path)
+	if FxGlue.bad[path] or FxGlue.loading[path] or not loadstring then return end
 	local entry
 	for _, e in ipairs(State.entries or {}) do
-		if e.path == w.path then
+		if e.path == path then
 			entry = e
 			break
 		end
 	end
 	if not entry then
-		entry = Live.fallbackEntry(w)
-	end
-	if not entry then
-		if not Live.noted[key] then
-			Live.noted[key] = true
-			Live.say("live: invalid script path from " .. tostring(w.name or w.uid), THEME.bad)
-		end
+		FxGlue.bad[path] = true
+		Fx.log("ignored path not in this repo: " .. tostring(path))
 		return
 	end
-	local affect = false
-	Live.starting[key] = true
-	Live.spawn(function()
-		local src = Net.source(entry)
-		Live.starting[key] = nil
-		if not src then
-			if not Live.noted[key] then
-				Live.noted[key] = true
-				Live.say("live: could not download " .. tostring(entry.file) .. " (new file? github cache can take a few minutes)", THEME.bad)
-			end
-			return
-		end
-		if not State.alive or Live.ghosts[key] then return end
-		local g = {
-			key = key, uid = w.uid, player = plr, owner = plr, affect = affect and true or false, entry = entry, hash = w.hash,
-			threads = {}, conns = {}, grips = {}, keys = {}, buttons = {}, actions = {}, toolList = {},
-			created = setmetatable({}, { __mode = "k" }),
-		}
-		Live.buildGhost(g)
-		local fn, err = loadstring(Live.wrap(src), "=spellshub_ghost_" .. w.uid .. "_" .. entry.file)
-		if not fn then
-			Debug.err("ghost compile " .. entry.file .. ": " .. tostring(err))
-			return
-		end
-		g.source = chunkSource(fn)
-		Live.ghosts[key] = g
-		Live.camGuard()
-		Live.decoyCheck()
-		Live.say("live: replaying " .. entry.name .. " from " .. tostring(w.name or w.uid), THEME.good)
-		table.insert(g.threads, task.spawn(function()
-			local ok, runErr = pcall(fn, g.env)
-			if not ok then
-				Live.say("live: ghost error: " .. tostring(runErr), THEME.bad)
-			end
-		end))
-		task.delay(1, Live.flushPending, g)
-	end)
-end
-
-function Live.stopGhost(key)
-	local g = Live.ghosts[key]
-	if not g then return end
-	Live.ghosts[key] = nil
-	for name, fn in pairs(g.genv) do
-		local n = string.lower(tostring(name))
-		if type(fn) == "function" and (string.find(n, "cleanup", 1, true) or string.find(n, "clear", 1, true)) then
-			pcall(fn)
-		end
-	end
-	for _, th in ipairs(g.threads) do
-		pcall(task.cancel, th)
-	end
-	killThreads(g.source)
-	killConnections(g.source)
-	for inst in pairs(g.created) do
-		pcall(function() inst:Destroy() end)
-	end
-	for _, w in pairs(g.grips) do
-		pcall(function() w:Destroy() end)
-	end
-	for _, c in ipairs(g.conns) do
-		pcall(function() c:Disconnect() end)
-	end
-	for _, b in pairs(g.mouseEvents) do
-		pcall(function() b:Destroy() end)
-	end
-	for _, inst in ipairs({ g.inputBegan, g.inputEnded, g.backpack, g.gui }) do
-		pcall(function() inst:Destroy() end)
-	end
-	Live.camGuard()
-	Live.decoyRelease()
-	Live.decoyCheck()
-end
-
---// ---------- decoy: you show up as an npc double, scripts hit the double, only the effect reaches you (no damage) ----------
-
-Live.decoyFields = { "WalkSpeed", "JumpPower", "JumpHeight", "PlatformStand" }
-
-function Live.realRoot()
-	local c = Players.LocalPlayer.Character
-	return c and c:FindFirstChild("HumanoidRootPart")
-end
-
-function Live.realHum()
-	local c = Players.LocalPlayer.Character
-	return c and c:FindFirstChildOfClass("Humanoid")
-end
-
-function Live.decoyStop()
-	local d = Live.decoy
-	if not d then return end
-	Live.decoy = nil
-	for _, c in ipairs(d.conns) do
-		pcall(function() c:Disconnect() end)
-	end
-	local rh, rr = Live.realHum(), Live.realRoot()
-	if rh then
-		for f, orig in pairs(d.orig) do
-			pcall(function() rh[f] = orig end)
-		end
-	end
-	if rr and d.frozen then
-		pcall(function() rr.Anchored = false end)
-	end
-	pcall(function() d.model:Destroy() end)
-end
-
-function Live.decoyBuild()
-	local char = Players.LocalPlayer.Character
-	local root, hum = Live.realRoot(), Live.realHum()
-	if not char or not root or not hum or hum.Health <= 0 then return end
-	local was = char.Archivable
-	char.Archivable = true
-	local ok, model = pcall(function()
-		return char:Clone()
-	end)
-	char.Archivable = was
-	if not ok or not model then return end
-	model.Name = "SpellsDecoy"
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("BaseScript") or d:IsA("Tool") or d:IsA("Sound") or d:IsA("ParticleEmitter") or d:IsA("BillboardGui") or d:IsA("Highlight") or d:IsA("ForceField") then
-			pcall(function() d:Destroy() end)
-		end
-	end
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("BasePart") then
-			d.Transparency = 1
-			d.CanCollide = false
-		elseif d:IsA("Decal") or d:IsA("Texture") then
-			d.Transparency = 1
-		end
-	end
-	local droot = model:FindFirstChild("HumanoidRootPart")
-	local dhum = model:FindFirstChildOfClass("Humanoid")
-	if not droot or not dhum then
-		model:Destroy()
+	FxGlue.loading[path] = true
+	local src = Net.source(entry)
+	FxGlue.loading[path] = nil
+	if not src or not string.find(src, "SpellsFx", 1, true) then
+		FxGlue.bad[path] = true
+		Fx.log(entry.name .. " has no fx support, skipped")
 		return
 	end
-	pcall(function()
-		dhum.EvaluateStateMachine = false
-		dhum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-	end)
-	model.Parent = workspace
-	local att = Instance.new("Attachment")
-	att.Parent = droot
-	local vf = Instance.new("VectorForce")
-	vf.Attachment0 = att
-	vf.RelativeTo = Enum.ActuatorRelativeTo.World
-	vf.ApplyAtCenterOfMass = true
-	vf.Force = Vector3.new(0, droot.AssemblyMass * workspace.Gravity, 0)
-	vf.Parent = droot
-
-	local d = { model = model, root = droot, hum = dhum, char = char, conns = {}, orig = {}, applied = {}, parts = {}, born = os.clock(), inj = Vector3.zero, push = 0, pushStart = 0, cool = 0, at = {}, ign = {} }
-	for _, part in ipairs(model:GetDescendants()) do
-		if part:IsA("BasePart") then
-			table.insert(d.parts, part)
-		end
-	end
-	Live.decoy = d
-	table.insert(d.conns, RunService.Stepped:Connect(function()
-		local rr, rh = Live.realRoot(), Live.realHum()
-		if not rr or not rh or Players.LocalPlayer.Character ~= d.char or not model.Parent then
-			Live.decoyBroken = true
-			return
-		end
-		droot.CFrame = rr.CFrame
-		droot.AssemblyLinearVelocity = rr.AssemblyLinearVelocity
-		droot.AssemblyAngularVelocity = Vector3.zero
-		for _, part in ipairs(d.parts) do
-			part.CanCollide = false
-		end
-		d.v0 = rr.AssemblyLinearVelocity
-		for _, f in ipairs(Live.decoyFields) do
-			if d.applied[f] == nil then
-				pcall(function() dhum[f] = rh[f] end)
-			end
-		end
-	end))
-	table.insert(d.conns, RunService.Heartbeat:Connect(function(dt)
-		local rr, rh = Live.realRoot(), Live.realHum()
-		if not rr or not rh or not d.v0 then return end
-		local power = math.clamp(State.settings.ImpactPower or 0.5, 0.1, 1)
-		local now = os.clock()
-		if not droot.Anchored and now - d.born > 0.4 then
-			local dv = droot.AssemblyLinearVelocity - d.v0
-			if dv.Magnitude > 2 and now >= d.cool then
-				if now - d.push > 0.3 then
-					d.pushStart = now
-				end
-				if now - d.pushStart > 2.5 then
-					-- an effect that keeps pushing for seconds is stuck or looping: stop feeding it to you for a moment
-					d.cool = now + 1
-					d.pushStart = now + 1
-				else
-					dv = dv * power
-					if dv.Magnitude > 45 then
-						dv = dv.Unit * 45
-					end
-					local total = d.inj + dv
-					if total.Magnitude > 70 then
-						total = total.Unit * 70
-						dv = total - d.inj
-					end
-					rr.AssemblyLinearVelocity = rr.AssemblyLinearVelocity + dv
-					d.inj = total
-					d.push = now
-				end
-			end
-			local dp = droot.Position - rr.Position
-			if dp.Magnitude > 1.5 then
-				dp = dp * power
-				if dp.Magnitude > 6 then
-					dp = dp.Unit * 6
-				end
-				rr.CFrame = rr.CFrame + dp
-			end
-		end
-		-- the shove fades out on its own once the effect stops pushing, so nothing flies off forever
-		if d.inj.Magnitude > 0.5 then
-			local v = rr.AssemblyLinearVelocity
-			if v.Magnitude < 4 then
-				d.inj = Vector3.zero
-			elseif now - d.push > 0.12 then
-				local cut = d.inj * (1 - 0.88 ^ (dt * 60))
-				local lim = v.Magnitude * 0.5
-				if cut.Magnitude > lim then
-					cut = cut.Unit * lim
-				end
-				rr.AssemblyLinearVelocity = v - cut
-				d.inj = d.inj - cut
-			end
-			if rr.AssemblyLinearVelocity.Magnitude > 140 then
-				rr.AssemblyLinearVelocity = rr.AssemblyLinearVelocity.Unit * 140
-			end
-		else
-			d.inj = Vector3.zero
-		end
-		local frozen = droot.Anchored
-		if frozen and now < (d.noFreezeUntil or 0) then
-			for _, part in ipairs(d.parts) do
-				part.Anchored = false
-			end
-			frozen = false
-		elseif frozen and now - (d.frozenAt or now) > 6 then
-			-- a freeze never lasts forever: force it off and ignore re-freezes for a moment
-			for _, part in ipairs(d.parts) do
-				part.Anchored = false
-			end
-			d.noFreezeUntil = now + 4
-			frozen = false
-		end
-		if frozen and not d.frozen then
-			d.frozenAt = now
-		end
-		if frozen ~= (d.frozen or false) then
-			d.frozen = frozen
-			rr.Anchored = frozen
-		end
-		for _, f in ipairs(Live.decoyFields) do
-			local mine, real = dhum[f], rh[f]
-			if d.applied[f] == nil then
-				if mine ~= real and now >= (d.ign[f] or 0) then
-					d.orig[f] = real
-					d.applied[f] = true
-					d.at[f] = now
-					rh[f] = mine
-				end
-			elseif mine == d.orig[f] then
-				rh[f] = d.orig[f]
-				d.applied[f] = nil
-				d.orig[f] = nil
-			elseif now - (d.at[f] or now) > 6 then
-				-- a stun / slow / stand never lasts more than 6s, even if the effect forgot to undo it
-				rh[f] = d.orig[f]
-				pcall(function() dhum[f] = d.orig[f] end)
-				d.applied[f] = nil
-				d.orig[f] = nil
-				d.ign[f] = now + 4
-			else
-				rh[f] = mine
-			end
-		end
-	end))
-end
-
-Live.qs = setmetatable({}, { __mode = "k" })
-
--- real character is not hit by raycasts / region queries while powers run, so lasers and shots hit the double (or nothing), not you
-function Live.shield(on)
-	local char = Players.LocalPlayer.Character
-	if on and char then
-		for _, part in ipairs(char:GetDescendants()) do
-			if part:IsA("BasePart") and Live.qs[part] == nil then
-				Live.qs[part] = part.CanQuery
-				part.CanQuery = false
-			end
-		end
-	elseif not on then
-		for part, v in pairs(Live.qs) do
-			pcall(function() part.CanQuery = v end)
-			Live.qs[part] = nil
-		end
-	end
-end
-
--- your own powers cannot freeze, stun or root you. freezes from other hub players still go through the double
-function Live.guardTick()
-	local mine = State.settings.SelfGuard == true and Runner.count() > 0
-	Live.shield(mine or Live.decoy ~= nil)
-	if not mine then
-		Live.sgNorm = nil
+	local fn, err = loadstring("local print, warn = ...; " .. src, "=spellsfx_" .. entry.file)
+	if not fn then
+		FxGlue.bad[path] = true
+		Fx.log("compile error in " .. entry.name .. ": " .. tostring(err))
 		return
 	end
-	local rr, rh = Live.realRoot(), Live.realHum()
-	if not rr or not rh or rh.Health <= 0 then return end
-	local d = Live.decoy
-	local n = Live.sgNorm
-	if not n or n.hum ~= rh then
-		n = { hum = rh, ws = rh.WalkSpeed, jp = rh.JumpPower, jh = rh.JumpHeight }
-		Live.sgNorm = n
-	end
-	local ap = d and d.applied or {}
-	if not (d and d.frozen) and rr.Anchored then
-		rr.Anchored = false
-	end
-	if not ap.PlatformStand and rh.PlatformStand then
-		rh.PlatformStand = false
-	end
-	if not ap.WalkSpeed then
-		if rh.WalkSpeed >= 8 then
-			n.ws = rh.WalkSpeed
-		elseif n.ws >= 8 then
-			rh.WalkSpeed = n.ws
+	Fx.currentPath = path
+	Fx.viewerOnly = true
+	task.spawn(function()
+		local hp, hw = Debug.hooks(entry.name)
+		local ok, runErr = pcall(fn, hp, hw)
+		if not ok then
+			Fx.log("viewer error in " .. entry.name .. ": " .. tostring(runErr))
 		end
-	end
-	if rh.UseJumpPower then
-		if not ap.JumpPower then
-			if rh.JumpPower > 0 then
-				n.jp = rh.JumpPower
-			elseif n.jp > 0 then
-				rh.JumpPower = n.jp
-			end
-		end
-	elseif not ap.JumpHeight then
-		if rh.JumpHeight > 0 then
-			n.jh = rh.JumpHeight
-		elseif n.jh > 0 then
-			rh.JumpHeight = n.jh
-		end
-	end
-end
-
-function Live.decoyRelease()
-	local d = Live.decoy
-	if not d then return end
-	for _, part in ipairs(d.parts) do
-		pcall(function() part.Anchored = false end)
-	end
-	local rh, rr = Live.realHum(), Live.realRoot()
-	if rr and d.frozen then
-		pcall(function() rr.Anchored = false end)
-	end
-	d.frozen = false
-	if rh then
-		for f, orig in pairs(d.orig) do
-			pcall(function() rh[f] = orig end)
-		end
-	end
-	d.applied, d.orig, d.inj = {}, {}, Vector3.zero
-end
-
-function Live.decoyCheck()
-	local want = State.settings.Impact == true and next(Live.ghosts) ~= nil
-	if not want then
-		Live.decoyStop()
-		return
-	end
-	if Live.decoy and (Live.decoyBroken or not Live.decoy.model.Parent) then
-		Live.decoyStop()
-		Live.decoyBroken = nil
-	end
-	if not Live.decoy then
-		Live.decoyBuild()
-	end
-	if not Live.decoyWatch then
-		Live.decoyWatch = true
-		task.spawn(function()
-			while State.alive and next(Live.ghosts) ~= nil and State.settings.Impact do
-				task.wait(1)
-				Live.decoyCheck()
-			end
-			Live.decoyWatch = false
-		end)
-	end
-end
-
-function Live.stopAllGhosts()
-	local keys = {}
-	for key in pairs(Live.ghosts) do
-		table.insert(keys, key)
-	end
-	for _, key in ipairs(keys) do
-		Live.stopGhost(key)
-	end
-end
-
---// ---------- polling (everyone else) ----------
-
-function Live.sync(active)
-	local me = Live.myId()
-	local now = os.clock()
-	local peers, want = 0, {}
-	for uidStr, info in pairs(active) do
-		local uid = tonumber(uidStr)
-		if uid and uid ~= me and type(info) == "table" then
-			local hb = Live.hbs[uid]
-			if not hb or hb.b ~= info.b then
-				hb = { b = info.b, t = now }
-				Live.hbs[uid] = hb
-			end
-			if now - hb.t < 25 then
-				peers += 1
-				if type(info.r) == "table" then
-					for h, v in pairs(info.r) do
-						local path, kind, cat
-						if type(v) == "string" then
-							path = v
-						elseif type(v) == "table" then
-							path, kind, cat = v.p, v.k, v.c
-						end
-						if type(path) == "string" then
-							want[uid .. ":" .. h] = { uid = uid, hash = h, path = path, name = info.n, kind = kind, cat = cat }
-						end
-					end
-				end
-			end
-		end
-	end
-	for key, w in pairs(want) do
-		if not Live.ghosts[key] and not Live.starting[key] then
-			Live.startGhost(key, w)
-		end
-	end
-	local stale = {}
-	for key, g in pairs(Live.ghosts) do
-		if not want[key] or not g.owner.Parent then
-			table.insert(stale, key)
-		end
-	end
-	for _, key in ipairs(stale) do
-		Live.stopGhost(key)
-	end
-	if peers ~= Live.lastPeers then
-		Live.lastPeers = peers
-		Live.say(peers == 0 and "live: nobody else here" or ("live: " .. peers .. " player(s) sharing"))
-	end
-end
-
-function Live.applyMouse(mice)
-	for _, g in pairs(Live.ghosts) do
-		local m = mice[tostring(g.uid)]
-		if type(m) == "table" and type(m.x) == "number" and type(m.y) == "number" and type(m.z) == "number" then
-			g.hit = CFrame.new(m.x, m.y, m.z)
-			g.mouseEvents.Move:Fire()
-		end
-	end
-end
-
-function Live.apply(ev)
-	if ev.k == "t" then
-		local found = false
-		for _, g in pairs(Live.ghosts) do
-			if g.uid == ev.u and g.hash == ev.p then
-				found = true
-			end
-		end
-		if not found then
-			table.insert(Live.pending, { ev = ev, t = os.clock() })
-			if #Live.pending > 40 then
-				table.remove(Live.pending, 1)
-			end
-		end
-	end
-	if ev.k == "i" then
-		for _, g in pairs(Live.ghosts) do
-			if g.uid == ev.u then
-				pcall(Live.ghostInput, g, ev)
-			end
-		end
-	elseif ev.k == "t" then
-		for _, g in pairs(Live.ghosts) do
-			if g.uid == ev.u and g.hash == ev.p then
-				pcall(Live.ghostTool, g, ev)
-			end
-		end
-	end
-end
-
-function Live.consume(events)
-	local keys = {}
-	for k in pairs(events) do
-		table.insert(keys, k)
-	end
-	table.sort(keys)
-	local first = not Live.primed
-	Live.primed = true
-	local seen = {}
-	local me = Live.myId()
-	for _, k in ipairs(keys) do
-		seen[k] = true
-		if not first and not Live.seen[k] then
-			local ev = events[k]
-			if type(ev) == "table" and ev.u ~= me then
-				Live.apply(ev)
-			end
-		end
-	end
-	Live.seen = seen
-end
-
-function Live.handle(data)
-	Live.sync(type(data.active) == "table" and data.active or {})
-	Live.applyMouse(type(data.mouse) == "table" and data.mouse or {})
-	Live.consume(type(data.events) == "table" and data.events or {})
-end
-
-function Live.setEnabled(v)
-	if v then
-		Live.primed = false
-		for _, run in pairs(State.runs) do
-			pcall(Live.onRun, run.entry, run)
-		end
-	else
-		Live.stopAllGhosts()
-		Live.clearMine()
-		table.clear(Live.my)
-	end
-end
-
-function Live.shutdown()
-	pcall(Live.stopAllGhosts)
-	pcall(Live.shield, false)
-	pcall(Live.decoyStop)
-	if CONFIG.Firebase and CONFIG.Firebase.Url ~= "" and httpRequest then
-		pcall(Live.clearMine)
-	end
-	pcall(function() RunService:UnbindFromRenderStep("SpellsHubGhostFovA") end)
-	pcall(function() RunService:UnbindFromRenderStep("SpellsHubGhostFovB") end)
-end
-
-function Live.start()
-	if Live.started then return end
-	Live.started = true
-	track(UserInputService.InputBegan:Connect(function(input, processed)
-		Live.onInput(input, processed, 1)
-	end))
-	track(UserInputService.InputEnded:Connect(function(input, processed)
-		Live.onInput(input, processed, 0)
-	end))
-	local okName, execName = pcall(function()
-		return identifyexecutor and identifyexecutor() or "?"
 	end)
-	Live.log("v5 start ready=" .. tostring(Live.ready()) .. " exec=" .. tostring(okName and execName or "?") .. " http=" .. tostring(httpRequest ~= nil) .. " loadstring=" .. tostring(loadstring ~= nil) .. " job=" .. string.sub(Live.room(), 1, 8) .. " entries=" .. tostring(State.entries and #State.entries or 0))
+	Fx.viewerOnly = false
+	Fx.log("viewer copy loaded: " .. entry.name)
+end
+
+function FxGlue.start()
+	if FxGlue.started then return end
+	FxGlue.started = true
+	Fx.onLog = function(text)
+		Debug.add("fx: " .. text)
+	end
+	Fx.onUnknown = FxGlue.load
+	Fx.listen = true
+	FxGlue.apply()
 	task.spawn(function()
 		while State.alive do
-			if not Live.ready() then
-				if not Live.warnedOff then
-					Live.warnedOff = true
-					Live.say("live: off (turn on Live sync in Settings and set Firebase Url)", THEME.bad)
-				end
-			else
-				local ok, data = Live.req("GET", "")
-				if ok then
-					if not Live.connected then
-						Live.connected = true
-						Live.say("live: connected, room " .. string.sub(Live.room(), 1, 6), THEME.good)
-					end
-					local okH, errH = pcall(Live.handle, data or {})
-					if not okH then
-						Live.log("handle error: " .. tostring(errH))
-					end
-				elseif not Live.lastCode and not Live.warnedNil then
-					Live.warnedNil = true
-					Live.say("live: no response from firebase (executor blocks the request?)", THEME.bad)
-				elseif Live.lastCode and Live.lastCode ~= Live.warned then
-					Live.warned = Live.lastCode
-					Live.say("firebase error " .. tostring(Live.lastCode) .. ", check url and rules", THEME.bad)
+			local st = Fx.status
+			if st ~= FxGlue.lastStatus then
+				FxGlue.lastStatus = st
+				Debug.add("fx: " .. tostring(st), st == "connected" and THEME.good or nil)
+				if string.find(st, "error") or string.find(st, "no response") then
+					notify("Spells fx", st)
 				end
 			end
-			task.wait(CONFIG.Firebase and CONFIG.Firebase.PollSeconds or 0.7)
-		end
-	end)
-	task.spawn(function()
-		local beatT, pruneT, mouseT = 0, 0, 0
-		while State.alive do
-			local okS, errS = pcall(function()
-			if Live.ready() then
-				local now = os.clock()
-				Live.flush()
-				if now - mouseT >= 0.15 then
-					mouseT = now
-					Live.sendMouse()
-				end
-				if now - beatT >= 5 then
-					beatT = now
-					Live.beat += 1
-					Live.pushActive()
-					local gc, mc = 0, 0
-					for _ in pairs(Live.ghosts) do
-						gc += 1
-					end
-					for _ in pairs(Live.my) do
-						mc += 1
-					end
-					local line = "state peers=" .. tostring(Live.lastPeers) .. " ghosts=" .. gc .. " myRuns=" .. mc .. " code=" .. tostring(Live.lastCode)
-					if line ~= Live.lastLine then
-						Live.lastLine = line
-						Live.log(line)
-					end
-				end
-				if now - pruneT >= 10 then
-					pruneT = now
-					Live.prune()
-				end
+			if not Fx.ready() and not FxGlue.warnedOff then
+				FxGlue.warnedOff = true
+				Debug.add("fx: off (turn on Live sync in Settings and set CONFIG.Fx.Url)", THEME.bad)
 			end
-			end)
-			if not okS then
-				Live.log("sender error: " .. tostring(errS))
-			end
-			task.wait(0.15)
+			task.wait(1)
 		end
 	end)
 end
+
 
 --// ============================== icons ==============================
 
@@ -2972,21 +2339,11 @@ function Debug.build()
 	task.spawn(function()
 		while State.alive and f.Parent do
 			if f.Visible then
-				local ghosts, names = 0, {}
-				for _, g in pairs(Live.ghosts) do
-					ghosts += 1
-					table.insert(names, g.entry and g.entry.name or "?")
+				local count = 0
+				for _ in pairs(Fx.abilities) do
+					count += 1
 				end
-				local shared = 0
-				for _ in pairs(Live.my) do shared += 1 end
-				info.Text = string.format(
-					"live:%s conn:%s ghosts:%d shared:%d decoy:%s%s",
-					Live.ready() and "on" or "off",
-					Live.connected and "yes" or "no",
-					ghosts, shared,
-					Live.decoy and "yes" or "no",
-					ghosts > 0 and ("\n" .. table.concat(names, ", ")) or ""
-				)
+				info.Text = string.format("fx:%s abilities:%d\n%s", Fx.ready() and "on" or "off", count, tostring(Fx.status))
 			end
 			task.wait(0.5)
 		end
@@ -3424,14 +2781,14 @@ local function createBrowser(kind)
 	pressFx(shareBtn)
 	function B.paintShare()
 		local e = B.current
-		local on = e == nil or Live.isShared(e)
+		local on = e == nil or FxGlue.isShared(e)
 		shareLabel.Text = on and "SHARE" or "HIDDEN"
 		shareLabel.TextColor3 = (e and on) and Accent.color or THEME.dim
 		shareStroke.Color = (e and on) and Accent.color or THEME.line
 	end
 	track(shareBtn.Activated:Connect(function()
 		if not B.current then return end
-		Live.setShare(B.current, not Live.isShared(B.current))
+		FxGlue.setShare(B.current, not FxGlue.isShared(B.current))
 		B.paintShare()
 	end))
 
@@ -4038,34 +3395,31 @@ local function createSettings()
 		State.settings.Stack = v
 		saveSettings()
 	end)
-	makeToggle(row("Live sync", "see other players' powers and weapons (firebase)"), State.settings.Live, function(v)
+	makeToggle(row("Live sync", "see other players' powers and weapons (custom firebase)"), State.settings.Live, function(v)
 		State.settings.Live = v
 		saveSettings()
-		Live.setEnabled(v)
-	end)
-	makeToggle(row("Protect me", "your own powers can't hit, freeze or stun you"), State.settings.SelfGuard, function(v)
-		State.settings.SelfGuard = v
-		saveSettings()
+		FxGlue.apply()
 	end)
 	makeToggle(row("Silence console", "power and weapon print/warn go to the debug panel"), State.settings.Quiet, function(v)
 		State.settings.Quiet = v
 		saveSettings()
 	end)
-	makeSlider(row("Impact strength", "how hard other players' powers push you"), 0.1, 1, State.settings.ImpactPower, 0.05, function(v)
+	makeSlider(row("Push strength", "how hard other players' powers push you (never damage)"), 0.1, 1, State.settings.ImpactPower, 0.05, function(v)
 		return string.format("%d%%", math.floor(v * 100 + 0.5))
 	end, function(v)
 		State.settings.ImpactPower = v
 		saveSettings()
+		FxGlue.apply()
 	end)
 	makeToggle(row("Live debug", "floating panel with live sync status and logs"), State.settings.Debug, function(v)
 		State.settings.Debug = v
 		saveSettings()
 		Debug.setVisible(v)
 	end)
-	makeToggle(row("Receive effects", "other players' powers push or freeze you, no damage"), State.settings.Impact, function(v)
+	makeToggle(row("Receive pushes", "other players' powers can softly push you, no damage"), State.settings.Impact, function(v)
 		State.settings.Impact = v
 		saveSettings()
-		Live.decoyCheck()
+		FxGlue.apply()
 	end)
 	do
 		local r = row("Toggle key", "show or hide the hub")
@@ -5280,22 +4634,15 @@ local function main()
 	UI.relayout()
 	UI.switchTo("Powers", true)
 	UI.refreshFooter()
-	task.spawn(function()
-		while State.alive do
-			pcall(Live.guardTick)
-			task.wait(0.15)
-		end
-	end)
 	UI.setOpen(true)
 	if State.settings.Debug then
 		Debug.setVisible(true)
 	end
 	creditNotifications()
 	task.spawn(UI.populate)
-	local okLive, errLive = pcall(Live.start)
-	if not okLive then
-		notify("Spells live", "start error: " .. tostring(errLive))
-		pcall(Live.log, "start error: " .. tostring(errLive))
+	local okFx, errFx = pcall(FxGlue.start)
+	if not okFx then
+		notify("Spells fx", "start error: " .. tostring(errFx))
 	end
 
 	task.spawn(function()

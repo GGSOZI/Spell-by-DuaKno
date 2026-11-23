@@ -4,6 +4,9 @@ local Debris = game:GetService("Debris")
 local SoundService = game:GetService("SoundService")
 local Lighting = game:GetService("Lighting")
 local lp = Players.LocalPlayer
+local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
+local VIEWER = Fx.viewerOnly == true
+local FX_PATH = Fx.currentPath
 local U = {}
 local mouse = lp:GetMouse()
 
@@ -20,15 +23,15 @@ local CONFIG = {
 	MaxSpeedMin = 70,
 	MaxSpeedMax = 190,
 	Swirl = 0.5,
-	BlastPower = 230,
+	BlastPower = 24,
 	KillRangeMult = 1.3,
 	ParticleScale = 3,
 	PullPlayer = true,
 	PlayerPullMult = 0.7,
 	PlayerSwirl = 0,
-	PlayerMaxSpeed = 55,
-	PlayerBlast = 60,
-	PlayerBlastUp = 35,
+	PlayerMaxSpeed = 24,
+	PlayerBlast = 20,
+	PlayerBlastUp = 10,
 	DistortRangeMult = 1.2,
 	ShakeMax = 0.5,
 	FovMax = 8,
@@ -58,7 +61,7 @@ local CONFIG = {
 }
 
 local env = (getgenv and getgenv()) or _G
-if env.BlackHoleCleanup then
+if not VIEWER and env.BlackHoleCleanup then
 	pcall(env.BlackHoleCleanup)
 end
 
@@ -195,32 +198,31 @@ function U.shake(power)
 	end)
 end
 
-function U.killNpc(model, hp)
+function U.pushNpc(model, hp)
 	local hum = model:FindFirstChildOfClass("Humanoid")
 	if hum then
 		pcall(function() hum.PlatformStand = false end)
-		pcall(function() hum.Health = 0 end)
-		pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
+		pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
 	end
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("Motor6D") and (d.Name == "Neck" or d.Name == "Root" or d.Name == "RootJoint") then
-			pcall(function() d:Destroy() end)
-		end
-	end
-	pcall(function() model:BreakJoints() end)
 	for _, p in ipairs(model:GetDescendants()) do
 		if p:IsA("BasePart") and not p.Anchored then
 			local dir = p.Position - hp
-			dir = dir.Magnitude > 0.1 and dir.Unit or Vector3.yAxis
+			dir = Vector3.new(dir.X, 0, dir.Z)
+			dir = dir.Magnitude > 0.1 and dir.Unit or Vector3.xAxis
 			pcall(function()
-				p.AssemblyLinearVelocity = dir * 120 + Vector3.new(0, 60, 0)
-				p.AssemblyAngularVelocity = Vector3.new(math.random(-20, 20), math.random(-20, 20), math.random(-20, 20))
+				p.AssemblyLinearVelocity = dir * 20 + Vector3.new(0, 8, 0)
 			end)
 		end
 	end
 end
 
-local function spawnBlackHole(targetPos, onFinished)
+local remoteHoles = {}
+
+local function spawnBlackHole(targetPos, onFinished, remote)
+	if not remote then
+		local tp = Fx.playerAt(mouse, 12)
+		Fx.emit("blackhole", "cast", { pos = Fx.vec(targetPos) }, tp and tp.UserId)
+	end
 	local folder = Instance.new("Folder")
 	folder.Name = "BlackHole_" .. tostring(math.random(1000, 9999))
 	folder.Parent = workspace
@@ -280,7 +282,7 @@ local function spawnBlackHole(targetPos, onFinished)
 	end
 
 	U.setFilter(folder)
-	U.claimOwnership()
+	if not remote then U.claimOwnership() end
 
 	local cam = workspace.CurrentCamera
 	local baseFov = cam.FieldOfView
@@ -291,11 +293,16 @@ local function spawnBlackHole(targetPos, onFinished)
 	cc.Parent = Lighting
 	local ragdolled = false
 	local safePos = nil
+	local volK = 1
+	if remote then
+		local lr = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+		volK = lr and math.clamp(1 - (lr.Position - hp).Magnitude / 300, 0.1, 1) or 0.5
+	end
 
 	function F.playSound(id, vol, looped)
 		local snd = Instance.new("Sound")
 		snd.SoundId = "rbxassetid://" .. id
-		snd.Volume = vol
+		snd.Volume = vol * volK
 		snd.Looped = looped or false
 		snd.Parent = SoundService
 		snd:Play()
@@ -309,7 +316,8 @@ local function spawnBlackHole(targetPos, onFinished)
 
 	local list, captured = {}, {}
 	local t0 = os.clock()
-	local scanAcc, fxAcc, claimAcc = 1, 1, 0
+	local scanAcc, fxAcc, claimAcc, pullAcc = 1, 1, 0, 0
+	local npcRoots = {}
 	local burstT = {lightning = 0, debris = 0, colkor = 0}
 	local lightningFlip = false
 	local diameter = CONFIG.StartDiameter
@@ -321,6 +329,7 @@ local function spawnBlackHole(targetPos, onFinished)
 	function F.finish()
 		if not F.done then
 			F.done = true
+			if remote then remoteHoles[F.teardown] = nil end
 			onFinished()
 		end
 	end
@@ -644,7 +653,11 @@ local function spawnBlackHole(targetPos, onFinished)
 			end)
 		end
 	end
-	env.BlackHoleFxClear = F.teardown
+	if remote then
+		remoteHoles[F.teardown] = true
+	else
+		env.BlackHoleFxClear = F.teardown
+	end
 
 	RunService:BindToRenderStep(camName, Enum.RenderPriority.Camera.Value + 1, function()
 		local now = os.clock()
@@ -684,15 +697,20 @@ local function spawnBlackHole(targetPos, onFinished)
 	end
 
 	function F.scan()
+		if remote then
+			list = {}
+			return
+		end
 		U.setFilter(folder)
 		local found = workspace:GetPartBoundsInRadius(hp, range, overlap)
-		local newList = {}
+		local newList, newNpc = {}, {}
 		for _, p in ipairs(found) do
 			local root = p.AssemblyRootPart
 			if root and not root.Anchored then
 				local model, isPlayer = U.getNpc(p)
 				if model then
 					newList[#newList + 1] = p
+					newNpc[root] = true
 					if not captured[model] then
 						captured[model] = true
 					end
@@ -707,6 +725,7 @@ local function spawnBlackHole(targetPos, onFinished)
 			end
 		end
 		list = newList
+		npcRoots = newNpc
 	end
 
 	local function step(dt)
@@ -729,7 +748,20 @@ local function spawnBlackHole(targetPos, onFinished)
 		claimAcc += dt
 		if claimAcc >= 1 then
 			claimAcc = 0
-			U.claimOwnership()
+			if not remote then U.claimOwnership() end
+		end
+
+		pullAcc += dt
+		if pullAcc >= 0.5 and not remote then
+			pullAcc = 0
+			local sent = 0
+			for _, plr in ipairs(Fx.playersInRadius(hp, range, false)) do
+				local pr = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+				if pr and sent < 6 then
+					sent += 1
+					Fx.push(plr.UserId, hp - pr.Position, 6 + 4 * a, "blackhole")
+				end
+			end
 		end
 
 		fxAcc += dt
@@ -791,8 +823,9 @@ local function spawnBlackHole(targetPos, onFinished)
 							v = v * 0.92
 						end
 						local sp = v.Magnitude
-						if sp > maxSpeed then
-							v = v / sp * maxSpeed
+						local capSp = npcRoots[root] and 26 or math.min(maxSpeed, 40)
+						if sp > capSp then
+							v = v / sp * capSp
 						end
 						root.AssemblyLinearVelocity = v
 						root.AssemblyAngularVelocity = Vector3.new(f * 8, f * 12, f * 6)
@@ -813,7 +846,7 @@ local function spawnBlackHole(targetPos, onFinished)
 			pullF = d < range and (1 - d / range) ^ 2 or 0
 			intensity = (proximity ^ 1.3 * 0.7 + pullF * 0.3) * (0.35 + 0.65 * a)
 			intensity = math.clamp(intensity * 1.15, 0, 1)
-			if CONFIG.PullPlayer and d < range and d > 0.05 then
+			if not remote and CONFIG.PullPlayer and d < range and d > 0.05 then
 				local u = off / d
 				local f = (1 - d / range) ^ 2
 				local ramp = math.clamp(t / 1.5, 0, 1)
@@ -830,7 +863,7 @@ local function spawnBlackHole(targetPos, onFinished)
 			if myHum and myHum.FloorMaterial ~= Enum.Material.Air then
 				safePos = hrp.Position
 			end
-			if myHum then
+			if myHum and not remote then
 				if d < range * 0.5 then
 					myHum.PlatformStand = true
 					ragdolled = true
@@ -852,7 +885,7 @@ local function spawnBlackHole(targetPos, onFinished)
 			local amt = intensity * CONFIG.ShakeMax * 2 + pullF * a * CONFIG.ShakeMax + a * 0.05
 			myHum.CameraOffset = Vector3.new((math.random() - 0.5) * amt, (math.random() - 0.5) * amt, 0)
 		end
-		activeSnd.Volume = 0.35 + 0.65 * a
+		activeSnd.Volume = (0.35 + 0.65 * a) * volK
 		activeSnd.PlaybackSpeed = 0.9 + 0.2 * a
 
 		if t >= CONFIG.Duration then
@@ -894,7 +927,7 @@ local function spawnBlackHole(targetPos, onFinished)
 				cc:Destroy()
 			end)
 
-			U.claimOwnership()
+			if not remote then U.claimOwnership() end
 			for _, name in ipairs(active) do
 				E[name].Enabled = false
 			end
@@ -929,7 +962,7 @@ local function spawnBlackHole(targetPos, onFinished)
 				U.shake(math.clamp(1 - dist / (range * 2), 0, 1) * CONFIG.ExplodeShake)
 			end
 
-			if rootPart then
+			if rootPart and not remote then
 				local poff = rootPart.Position - hp
 				local flat = Vector3.new(poff.X, 0, poff.Z)
 				local pdir = flat.Magnitude > 0.5 and flat.Unit or Vector3.zero
@@ -956,7 +989,7 @@ local function spawnBlackHole(targetPos, onFinished)
 
 			U.setFilter(folder)
 			local blastRange = range * CONFIG.KillRangeMult
-			local found = workspace:GetPartBoundsInRadius(hp, blastRange, overlap)
+			local found = remote and {} or workspace:GetPartBoundsInRadius(hp, blastRange, overlap)
 			local done = {}
 			for _, p in ipairs(found) do
 				local root = p.AssemblyRootPart
@@ -969,7 +1002,7 @@ local function spawnBlackHole(targetPos, onFinished)
 						local dir = d > 0.1 and off / d or Vector3.yAxis
 						local f = math.clamp(1 - d / blastRange, 0.15, 1)
 						pcall(function()
-							root.AssemblyLinearVelocity = dir * CONFIG.BlastPower * f + Vector3.new(0, 40 * f, 0)
+							root.AssemblyLinearVelocity = dir * CONFIG.BlastPower * f + Vector3.new(0, 8 * f, 0)
 						end)
 					end
 				end
@@ -979,7 +1012,7 @@ local function spawnBlackHole(targetPos, onFinished)
 				if model.Parent then
 					local mroot = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
 					if mroot and (mroot.Position - hp).Magnitude <= blastRange then
-						U.killNpc(model, hp)
+						U.pushNpc(model, hp)
 					else
 						local hum = model:FindFirstChildOfClass("Humanoid")
 						if hum then
@@ -990,9 +1023,20 @@ local function spawnBlackHole(targetPos, onFinished)
 				end
 			end
 
+			if not remote then
+				for _, plr in ipairs(Fx.playersInRadius(hp, blastRange, false)) do
+					local pr = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+					if pr then
+						local off = pr.Position - hp
+						local f = math.clamp(1 - off.Magnitude / blastRange, 0.3, 1)
+						Fx.push(plr.UserId, off, 22 * f, "blackhole")
+					end
+				end
+			end
+
 			task.delay(0.6, F.restoreSoft)
 			Debris:AddItem(folder, 5)
-			env.BlackHoleFxClear = nil
+			if not remote then env.BlackHoleFxClear = nil end
 			F.finish()
 		end
 	end
@@ -1000,11 +1044,31 @@ local function spawnBlackHole(targetPos, onFinished)
 	conn = RunService.Heartbeat:Connect(function(dt)
 		if not pcall(step, dt) and not fxEnd then
 			F.teardown()
-			env.BlackHoleFxClear = nil
+			if not remote then env.BlackHoleFxClear = nil end
 			F.finish()
 		end
 	end)
 end
+
+-- another player's black hole, replayed as visuals (no part physics, the push on you comes from the caster through SpellsFx)
+local function remotePlay(pkt)
+	if pkt.kind ~= "cast" or type(pkt.d) ~= "table" then return end
+	local pos = Fx.unvec(pkt.d.pos)
+	if not pos then return end
+	task.spawn(function()
+		pcall(spawnBlackHole, pos, function() end, true)
+	end)
+end
+
+local function remoteStop()
+	for stopHole in pairs(table.clone(remoteHoles)) do
+		pcall(stopHole)
+	end
+	table.clear(remoteHoles)
+end
+
+Fx.register("blackhole", { play = remotePlay, stop = remoteStop }, FX_PATH)
+if VIEWER then return end
 
 local tool
 
@@ -1068,6 +1132,7 @@ local charConn = lp.CharacterAdded:Connect(function()
 end)
 
 env.BlackHoleCleanup = function()
+	pcall(Fx.unregister, "blackhole")
 	if env.BlackHoleFxClear then
 		pcall(env.BlackHoleFxClear)
 	end

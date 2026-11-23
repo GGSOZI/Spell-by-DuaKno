@@ -15,8 +15,11 @@ local Lighting = game:GetService("Lighting")
 local StarterGui = game:GetService("StarterGui")
 local InsertService = game:GetService("InsertService")
 local lp = Players.LocalPlayer
+local Fx = (getgenv and getgenv().SpellsFx) or { viewerOnly = false, config = {}, register = function() end, unregister = function() end, emit = function() end, push = function() end, softPush = function() return false end, playerAt = function() return nil end, playerFromInstance = function() return nil end, playersInRadius = function() return {} end, vec = function(v) return { x = v.X, y = v.Y, z = v.Z } end, unvec = function(t) if type(t) == "table" and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number" then return Vector3.new(t.x, t.y, t.z) end return nil end, ready = function() return false end }
+local VIEWER = Fx.viewerOnly == true
+local FX_PATH = Fx.currentPath
 local env = (getgenv and getgenv()) or _G
-if env.__IceshockStop then pcall(env.__IceshockStop) end
+if not VIEWER and env.__IceshockStop then pcall(env.__IceshockStop) end
 
 local CFG = {
 	assets = { 104462944256312, 88831954909283 },
@@ -26,7 +29,6 @@ local CFG = {
 	maxRange = 1000,
 	freezeTime = 5.5,
 	freezeNPCs = true,
-	killNPCs = true,
 	shake = true,
 	extraSoundIds = {},
 	soundPray = 74133338551128,
@@ -59,6 +61,7 @@ end
 
 -- ===================== NETWORK OWNERSHIP + SIMULATION RADIUS =====================
 local function simBoost()
+	if VIEWER then return end
 	pcall(function() sethiddenproperty(lp, "SimulationRadius", math.huge) end)
 	pcall(function() lp.MaximumSimulationRadius = math.huge end)
 	pcall(function() if setsimulationradius then setsimulationradius(math.huge, math.huge) end end)
@@ -942,7 +945,7 @@ local function freezeNPC(model, from, dur, boom)
 		dir = Vector3.new(rng:NextNumber(-1, 1), 0, rng:NextNumber(-1, 1)).Unit
 	end
 	pcall(function()
-		root.AssemblyLinearVelocity = dir * 60 + Vector3.new(0, 40, 0)
+		root.AssemblyLinearVelocity = dir * 18 + Vector3.new(0, 8, 0)
 		hum:ChangeState(Enum.HumanoidStateType.Freefall)
 	end)
 	task.wait(0.4)
@@ -978,25 +981,11 @@ local function freezeNPC(model, from, dur, boom)
 		if boom and explodeFX then pcall(explodeFX, root.Position) end
 		shatterBurst(root.CFrame)
 		flakeBurst(root.Position, 8)
-		if CFG.killNPCs then
-			simBoost()
-			pcall(function() hum.Health = 0 end)
-			pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
-			pcall(function() model:BreakJoints() end)
-			pcall(function()
-				for _, d in ipairs(model:GetDescendants()) do
-					if d:IsA("BasePart") then
-						d.AssemblyLinearVelocity = dir * 50 + Vector3.new(0, 34, 0)
-					end
-				end
-			end)
-		else
-			pcall(function()
-				hum.WalkSpeed = 16
-				hum.JumpHeight = 7.2
-				hum.AutoRotate = true
-			end)
-		end
+		pcall(function()
+			hum.WalkSpeed = 16
+			hum.JumpHeight = 7.2
+			hum.AutoRotate = true
+		end)
 	end)
 end
 
@@ -1022,8 +1011,8 @@ end
 -- ===================== LOOSE (UNANCHORED) PARTS: freeze, then fly away =====================
 CFG.freezeLoose = true -- unanchored parts in the beam radius freeze, then get launched
 CFG.looseFreeze = 2.2 -- seconds they stay frozen before flying away
-CFG.looseFling = 130 -- sideways launch speed (away from the beam)
-CFG.looseLift = 90 -- upward launch speed
+CFG.looseFling = 20 -- sideways push speed (away from the beam)
+CFG.looseLift = 10 -- upward push speed
 CFG.looseMax = 120 -- max assemblies affected per cast (lag guard)
 local looseBusy = {}
 
@@ -1101,7 +1090,7 @@ local function freezeLoose(root, from, dur, lite)
 			simBoost()
 			pcall(function()
 				root.AssemblyLinearVelocity = dir * CFG.looseFling + Vector3.new(0, CFG.looseLift, 0)
-				root.AssemblyAngularVelocity = Vector3.new(rng:NextNumber(-12, 12), rng:NextNumber(-12, 12), rng:NextNumber(-12, 12))
+				root.AssemblyAngularVelocity = Vector3.new(rng:NextNumber(-3, 3), rng:NextNumber(-3, 3), rng:NextNumber(-3, 3))
 			end)
 			task.delay(1.5, restore) -- stays icy while it flies
 		else
@@ -1141,6 +1130,35 @@ local function hitLoose(pos, rad, dur)
 		task.delay(rng:NextNumber(0.1, 0.6), function()
 			if alive then pcall(freezeLoose, r, pos, dur, n > 25) end
 		end)
+	end
+end
+
+-- players near the hit get an ice block around them (visual only) and a soft push. nothing is held, nothing is damaged
+local function hitPlayers(pos, rad, push, skipId)
+	for _, plr in ipairs(Fx.playersInRadius(pos, rad or CFG.radius, not push)) do
+		local char = plr.Character
+		local pr = char and char:FindFirstChild("HumanoidRootPart")
+		if pr and plr.UserId ~= skipId then
+			local away = Vector3.new(pr.Position.X - pos.X, 0, pr.Position.Z - pos.Z)
+			if away.Magnitude < 0.1 then
+				away = Vector3.new(rng:NextNumber(-1, 1), 0, rng:NextNumber(-1, 1))
+			end
+			if push then
+				Fx.push(plr.UserId, away, 14, "iceshock")
+			end
+			task.delay(rng:NextNumber(0.5, 0.9), function()
+				if not alive or not char.Parent or not pr.Parent then return end
+				local okB, bcf, bsz = pcall(char.GetBoundingBox, char)
+				if not okB then return end
+				local shatter = iceCage(bcf, bsz, true)
+				task.delay(2, function()
+					pcall(shatter, true)
+					if push and pr.Parent then
+						Fx.push(plr.UserId, away, 8, "iceshock")
+					end
+				end)
+			end)
+		end
 	end
 end
 
@@ -1552,10 +1570,13 @@ local function buildIceTool()
 	return tool
 end
 
-local iceTemplate = buildIceTool()
-iceTemplate:SetAttribute("IceshockTool", true)
+local iceTemplate
+if not VIEWER then
+	iceTemplate = buildIceTool()
+	iceTemplate:SetAttribute("IceshockTool", true)
+end
 
-local function iceShockFX(pos)
+local function iceShockFX(pos, remote)
 	local up90 = CFrame.Angles(0, 0, math.rad(90))
 	local H = 130
 
@@ -1630,9 +1651,16 @@ local function iceShockFX(pos)
 	particleRing(pos + Vector3.new(0, 0.6, 0), 14, 85, 16)
 	iceDebris(pos, 8)
 	flakeBurst(pos + Vector3.new(0, 3, 0), 18)
-	bloomPulse(0.4, 1.1)
-	screenFlash(0.3)
-	shakeCamera(0.7, 0.4)
+	if not remote then
+		bloomPulse(0.4, 1.1)
+		screenFlash(0.3)
+		shakeCamera(0.7, 0.4)
+	else
+		local lr = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+		if lr and (lr.Position - pos).Magnitude < 60 then
+			shakeCamera(0.3, 0.3)
+		end
+	end
 end
 
 explodeFX = function(pos)
@@ -1808,7 +1836,16 @@ local function castIce(tool)
 					if d < bd then best, bd = r, d end
 				end
 			end
+			local lockPlayer
+			for _, plr in ipairs(Fx.playersInRadius(target, 18, false)) do
+				local r = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+				if r then
+					local d = (r.Position - target).Magnitude
+					if d < bd then best, bd, lockPlayer = r, d, plr end
+				end
+			end
 			if best then target = groundPoint(best.Position, char) end
+			Fx.emit("iceshock", "cast", { pos = Fx.vec(target) }, lockPlayer and lockPlayer.UserId)
 
 			if arms then
 				local t0 = os.clock()
@@ -1827,6 +1864,7 @@ local function castIce(tool)
 			playSound(CFG.soundIce, SoundService, 2.5)
 			iceShockFX(target)
 			hitNPCs(target, 14, 3.5, true)
+			hitPlayers(target, 14, true)
 			task.wait(0.55)
 		end)
 		pcall(function() RunService:UnbindFromRenderStep(bind) end)
@@ -1841,6 +1879,72 @@ local function castIce(tool)
 		iceLast = os.clock()
 	end)
 end
+
+-- another player's cast, replayed as visuals only
+local remoteStops = {}
+
+local function remotePlay(pkt)
+	if not alive or pkt.kind ~= "cast" or type(pkt.d) ~= "table" then return end
+	local target = Fx.unvec(pkt.d.pos)
+	if not target then return end
+	local char = pkt.caster and pkt.caster.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local arms = root and (getArms(char) or fakeArms(char, root))
+	if not arms then
+		char = fxFolder
+		root = fxPart({ Transparency = 1, Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(target + Vector3.new(0, 4, 30)) })
+		arms = fakeArms(char, root)
+	end
+	local orig = arms.r.C0
+	local bind = "IceshockRemote" .. tostring(pkt.casterId) .. tostring(os.clock())
+	local bound = false
+	local function cleanup()
+		remoteStops[cleanup] = nil
+		if bound then
+			bound = false
+			pcall(function() RunService:UnbindFromRenderStep(bind) end)
+		end
+		pcall(function()
+			arms.r.C0 = orig
+			arms.r.Transform = CFrame.new()
+		end)
+	end
+	remoteStops[cleanup] = true
+	pcall(function()
+		local t0 = os.clock()
+		bound = true
+		RunService:BindToRenderStep(bind, Enum.RenderPriority.Last.Value, function()
+			local k = math.clamp((os.clock() - t0) / 0.9, 0, 1)
+			arms.r.C0 = armCF(orig, math.sin(k * math.pi) * 0.85, 1)
+			arms.r.Transform = CFrame.new()
+		end)
+		flakeBurst(tipPos(char, arms.r, 1), 6)
+		task.wait(0.3)
+		if not alive then return end
+		iceBall(char, arms, target)
+		if not alive then return end
+		playSound(CFG.soundIce, anchorAt(target, 3), 2)
+		iceShockFX(target, true)
+		hitPlayers(target, 14, false, pkt.casterId)
+		task.wait(0.55)
+	end)
+	cleanup()
+end
+
+local function remoteStop()
+	for fin in pairs(table.clone(remoteStops)) do
+		pcall(fin)
+	end
+	table.clear(remoteStops)
+	if VIEWER then
+		alive = false
+		for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+		pcall(function() fxFolder:Destroy() end)
+	end
+end
+
+Fx.register("iceshock", { play = remotePlay, stop = remoteStop }, FX_PATH)
+if VIEWER then return end
 
 local function giveTool(tpl, handler)
 	if not alive then return end
@@ -1865,6 +1969,7 @@ conn(lp.CharacterAdded:Connect(function(char)
 end))
 
 env.__IceshockStop = function()
+	pcall(Fx.unregister, "iceshock")
 	alive = false
 	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 	for _, holder in ipairs({ lp:FindFirstChildOfClass("Backpack"), lp.Character }) do
