@@ -78,7 +78,7 @@ do
 		end)
 		return true
 	end
-	function SelfFxSafe.push(dir, power)
+	function SelfFx.push(dir, power)
 		local _, hum, root = mine()
 		if not (hum and root) or hum.Health <= 0 then return end
 		local flat = Vector3.new(dir.X, 0, dir.Z)
