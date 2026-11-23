@@ -1002,8 +1002,7 @@ local function iceCage(bcf, bsz, lite)
 end
 
 -- ===================== NPC KILL (network ownership) =====================
--- you own the NPC's physics (simulation radius), so its parts get broken apart and dropped under FallenPartsDestroyHeight.
--- the server sees them fall, destroys them and the NPC dies. only NPCs: any player model (with or without this script) is skipped
+-- you own the NPC's physics (simulation radius), so its death (joints broken + Dead state) replicates and it dies where it stands. only NPCs: any player model (with or without this script) is skipped
 local killing = setmetatable({}, { __mode = "k" })
 local function killNPC(model)
 	if not model or killing[model] or not model.Parent then return end
@@ -1013,32 +1012,18 @@ local function killNPC(model)
 	killing[model] = true
 	simBoost()
 	task.spawn(function()
-		pcall(function() hum.Health = 0 end)
-		pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
-		pcall(function() model:BreakJoints() end)
-		local parts = {}
+		-- die in place: unanchor so the body drops where it stands, break the joints, and keep telling the owned humanoid it is dead
 		for _, d in ipairs(model:GetDescendants()) do
 			if d:IsA("BasePart") then
-				parts[#parts + 1] = d
-				pcall(function()
-					d.Anchored = false
-					d.CanCollide = false
-					d.CanTouch = false
-				end)
+				pcall(function() d.Anchored = false end)
 			end
 		end
-		local fh = workspace.FallenPartsDestroyHeight
-		local voidY = (fh > -1e5) and (fh - 400) or -1e5
+		pcall(function() hum.PlatformStand = false end)
+		pcall(function() model:BreakJoints() end)
 		local t0 = os.clock()
-		while model.Parent and os.clock() - t0 < 3 do
-			for _, p in ipairs(parts) do
-				if p.Parent then
-					pcall(function()
-						p.AssemblyLinearVelocity = Vector3.new(0, -2000, 0)
-						p.CFrame = CFrame.new(p.Position.X, voidY, p.Position.Z)
-					end)
-				end
-			end
+		while model.Parent and os.clock() - t0 < 1.5 do
+			pcall(function() hum.Health = 0 end)
+			pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
 			RunService.Heartbeat:Wait()
 		end
 		killing[model] = nil
